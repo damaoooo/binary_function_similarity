@@ -32,6 +32,7 @@
 
 import hashlib
 import idaapi
+import ida_pro
 import idautils
 import idc
 import os
@@ -120,7 +121,7 @@ def get_function_hashopcodes(fva):
     opc_string = opc_string.upper()
 
     # Get the sha256 hash
-    hashopcodes = hashlib.sha256(opc_string).hexdigest()
+    hashopcodes = hashlib.sha256(opc_string.encode()).hexdigest()
     return hashopcodes
 
 
@@ -183,15 +184,15 @@ def analyze_functions(idb_path, output_csv):
 if __name__ == "__main__":
     if not idaapi.get_plugin_options("flowchart"):
         print("[!] -Oflowchart option is missing")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     plugin_options = idaapi.get_plugin_options("flowchart").split(':')
     if len(plugin_options) != 2:
         print("[!] -Oflowchart:IDB_PATH:OUTPUT_CSV is required")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     idb_path = plugin_options[0]
     output_csv = plugin_options[1]
 
     analyze_functions(idb_path, output_csv)
-    idc.Exit(0)
+    ida_pro.qexit(0)
