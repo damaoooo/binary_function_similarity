@@ -38,17 +38,27 @@ import json
 import subprocess
 import time
 
+import multiprocessing
+from tqdm import tqdm
+
 from os import getenv
 from os.path import abspath
 from os.path import dirname
 from os.path import isfile
 from os.path import join
 
-IDA_PATH = getenv("IDA_PATH", "/home/user/idapro-7.3/idat64")
+IDA_PATH = getenv("IDA_PATH", "/home/sentry2/idapro-7.7/idat64")
 IDA_PLUGIN = join(dirname(abspath(__file__)), 'IDA_acfg_features.py')
 REPO_PATH = dirname(dirname(dirname(abspath(__file__))))
 LOG_PATH = "acfg_features_log.txt"
 
+
+def execute_commands(cmd):
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = proc.communicate()
+
+    return proc.returncode == 0
 
 @click.command()
 @click.option('-j', '--json-path', required=True,
@@ -69,6 +79,8 @@ def main(json_path, output_dir):
         if not isfile(json_path):
             print("[!] Error: {} does not exist".format(json_path))
             return
+        
+        commands = []
 
         with open(json_path) as f_in:
             jj = json.load(f_in)
@@ -96,19 +108,27 @@ def main(json_path, output_dir):
                            output_dir),
                        idb_path]
 
-                print("[D] cmd: {}".format(cmd))
-
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                stdout, stderr = proc.communicate()
-
-                if proc.returncode == 0:
-                    print("[D] {}: success".format(idb_path))
+                print("[D] cmd: {}".format(' '.join(cmd)))
+                
+                commands.append(cmd)
+                
+            bar = tqdm(total=len(commands), desc='Processing IDBs')
+            pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+            rets = []
+            
+            for cmd in commands:
+                p = pool.apply_async(execute_commands, (cmd,), callback=lambda _: bar.update(1))
+                rets.append(p)
+                
+            pool.close()
+            pool.join()
+            
+            for ret in rets:
+                if ret.get():
                     success_cnt += 1
                 else:
-                    print("[!] Error in {} (returncode={})".format(
-                        idb_path, proc.returncode))
                     error_cnt += 1
+                
 
             end_time = time.time()
             print("[D] Elapsed time: {}".format(end_time - start_time))

@@ -27,3 +27,18 @@ DBs/Dataset-Vulnerability/features/
 DBs/Dataset-Vulnerability/pairs/
 
 Results/data/
+
+*.csv
+*.json
+
+DBs/Dataset-1/*
+!DBs/Dataset-1/*.ipynb
+
+DBs/Dataset-2/*
+!DBs/Dataset-2/*.ipynb
+
+DBs/Dataset-Vulnerability/*
+!DBs/Dataset-Vulnerability/*.ipynb
+
+DBs/Dataset-1-strip/*
+!DBs/Dataset-1-strip/*.ipynb
