@@ -35,6 +35,8 @@
 
 import click
 import subprocess
+import multiprocessing
+from tqdm import tqdm
 
 from os import getenv
 from os import makedirs
@@ -51,7 +53,7 @@ from os.path import samefile
 
 BIN_FOLDER = join(dirname(dirname(abspath(__file__))), 'Binaries')
 IDB_FOLDER = join(dirname(dirname(abspath(__file__))), 'IDBs')
-IDA_PATH = getenv("IDA_PATH", "/home/user/idapro-7.3/idat64")
+IDA_PATH = getenv("IDA_PATH", "/home/sentry2/idapro-7.7/idat64")
 LOG_PATH = "generate_idbs_log.txt"
 
 TEST_BINARIES = {
@@ -107,10 +109,16 @@ def directory_walk(input_folder, output_folder):
         if not isdir(output_folder):
             mkdir(output_folder)
 
+        commands = []
+
         for root, _, files in walk(input_folder):
             for fname in files:
                 if fname.endswith(".log") \
                         or fname.endswith(".idb") \
+                        or fname.endswith(".asm") \
+                        or fname.endswith(".txt") \
+                        or fname.endswith(".md") \
+                        or fname.endswith(".py") \
                         or fname.endswith(".i64"):
                     continue
 
@@ -124,11 +132,24 @@ def directory_walk(input_folder, output_folder):
 
                 input_path = join(root, fname)
                 output_path = join(tmp_out, fname + ".i64")
-                if export_idb(input_path, output_path):
-                    export_success += 1
-                else:
-                    export_error += 1
+                commands.append((input_path, output_path))
+                
+        pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+        bar = tqdm(total=len(commands), desc="Exporting IDBs")
+        ret = []
+        for input_path, output_path in commands:
+            p = pool.apply_async(export_idb, args=(input_path, output_path), callback=lambda _: bar.update(1))
+            ret.append(p)
+        pool.close()
+        pool.join()
+        bar.close()
 
+        for p in ret:
+            if p.get():
+                export_success += 1
+            else:
+                export_error += 1
+                
         print("# IDBs correctly exported: {}".format(export_success))
         print("# IDBs error: {}".format(export_error))
 
@@ -139,9 +160,10 @@ def directory_walk(input_folder, output_folder):
 @click.command()
 @click.option('--db1', is_flag=True)
 @click.option('--db2', is_flag=True)
+@click.option('--db1_strip', is_flag=True)
 @click.option('--dbvuln', is_flag=True)
 @click.option('--test', is_flag=True)
-def main(db1, db2, dbvuln, test):
+def main(db1, db2, db1_strip, dbvuln, test):
     """Launch IDA Pro and export the IDBs."""
     if not isfile(IDA_PATH):
         print("[!] Error: IDA_PATH:{} not valid".format(IDA_PATH))
@@ -154,6 +176,11 @@ def main(db1, db2, dbvuln, test):
         directory_walk(
             join(BIN_FOLDER, 'Dataset-1'),
             join(IDB_FOLDER, 'Dataset-1'))
+    if db1_strip:
+        no_action = False
+        directory_walk(
+            join(BIN_FOLDER, 'Dataset-1-strip'),
+            join(IDB_FOLDER, 'Dataset-1-strip'))
     if db2:
         no_action = False
         directory_walk(

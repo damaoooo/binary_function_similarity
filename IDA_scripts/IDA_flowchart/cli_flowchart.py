@@ -35,6 +35,9 @@
 
 import click
 import subprocess
+import multiprocessing
+from tqdm import tqdm
+
 
 from os import getcwd
 from os import getenv
@@ -45,10 +48,18 @@ from os.path import isfile
 from os.path import join
 from os.path import relpath
 
-IDA_PATH = getenv("IDA_PATH", "/home/user/idapro-7.3/idat64")
+IDA_PATH = getenv("IDA_PATH", "/home/sentry2/idapro-7.7/idat64")
 IDA_PLUGIN = join(dirname(abspath(__file__)), 'IDA_flowchart.py')
 REPO_PATH = dirname(dirname(dirname(abspath(__file__))))
 LOG_PATH = "flowchart_log.txt"
+
+
+def execute_command(cmd):
+    """Execute a command."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = proc.communicate()
+    return proc.returncode == 0
 
 
 @click.command()
@@ -66,6 +77,8 @@ def main(idbs_folder, output_csv):
 
         print("[D] IDBs folder: {}".format(idbs_folder))
         print("[D] Output CSV: {}".format(output_csv))
+
+        commands = []
 
         success_cnt, error_cnt = 0, 0
         for root, _, files in walk(idbs_folder):
@@ -95,19 +108,26 @@ def main(idbs_folder, output_csv):
                            output_csv),
                        idb_path]
 
-                print("[D] cmd: {}".format(cmd))
+                # print("[D] cmd: {}".format(' '.join(cmd)))
+                commands.append(cmd)
 
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                stdout, stderr = proc.communicate()
-
-                if proc.returncode == 0:
-                    print("[D] {}: success".format(idb_path))
-                    success_cnt += 1
-                else:
-                    print("[!] Error in {} (returncode={})".format(
-                        idb_path, proc.returncode))
-                    error_cnt += 1
+        bar = tqdm(total=len(commands), desc="Processing IDBs")
+        pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
+        
+        rets = []
+        for cmd in commands:
+            p = pool.apply_async(execute_command, args=(cmd,), callback=lambda x: bar.update(1))
+            rets.append(p)
+            
+        pool.close()
+        pool.join()
+        
+        for p in rets:
+            if p.get():
+                success_cnt += 1
+            else:
+                error_cnt += 1
+                
 
         print("\n# IDBs correctly processed: {}".format(success_cnt))
         print("# IDBs error: {}".format(error_cnt))

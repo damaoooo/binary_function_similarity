@@ -39,6 +39,7 @@ import json
 import ntpath
 import os
 import time
+import ida_pro
 
 from capstone import *
 from collections import namedtuple
@@ -224,7 +225,7 @@ def run_acfg_features(idb_path, fva_list, output_dir):
     output_dict = dict()
     output_dict[idb_path] = dict()
 
-    procname = idaapi.get_inf_structure().procName.lower()
+    procname = idaapi.get_inf_structure().procname.lower()
     bitness = get_bitness()
     md, arch = initialize_capstone(procname, bitness)
 
@@ -273,12 +274,12 @@ def run_acfg_features(idb_path, fva_list, output_dir):
 if __name__ == '__main__':
     if not idaapi.get_plugin_options("acfg_features"):
         print("[!] -Oacfg_features option is missing")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     plugin_options = idaapi.get_plugin_options("acfg_features").split(":")
     if len(plugin_options) != 3:
         print("[!] -Oacfg_features:INPUT_JSON:IDB_PATH:OUTPUT_DIR is required")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     input_json = plugin_options[0]
     idb_path = plugin_options[1]
@@ -289,10 +290,10 @@ if __name__ == '__main__':
 
     if idb_path not in selected_functions:
         print("[!] Error! IDB path (%s) not in %s" % (idb_path, input_json))
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     fva_list = selected_functions[idb_path]
     print("[D] Found %d addresses" % len(fva_list))
 
     run_acfg_features(idb_path, fva_list, output_dir)
-    idc.Exit(0)
+    ida_pro.qexit(0)
