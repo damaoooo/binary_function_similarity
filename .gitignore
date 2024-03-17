@@ -30,6 +30,7 @@ Results/data/
 
 *.csv
 *.json
+*.pkl
 
 DBs/Dataset-1/*
 !DBs/Dataset-1/*.ipynb
@@ -42,3 +43,13 @@ DBs/Dataset-Vulnerability/*
 
 DBs/Dataset-1-strip/*
 !DBs/Dataset-1-strip/*.ipynb
+
+test*.py
+test*.ipynb
+
+tempCodeRunnerFile.py
+tempCodeRunnerFile*
+test*.svg
+
+.idea
+*.zip
