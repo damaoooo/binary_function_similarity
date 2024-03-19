@@ -8,6 +8,8 @@ env
 Binaries/Dataset-1/
 Binaries/Dataset-2/
 Binaries/Dataset-Vulnerability/
+Binaries/Dataset-1*
+Binaries/Strip_Binaries
 
 IDBs/Dataset-1/
 IDBs/Dataset-2/
@@ -43,6 +45,12 @@ DBs/Dataset-Vulnerability/*
 
 DBs/Dataset-1-strip/*
 !DBs/Dataset-1-strip/*.ipynb
+
+IDBs/*
+!IDBs/*.ipynb
+!IDBs/*.py
+!IDBs/*.sh
+!IDBs/*.md
 
 test*.py
 test*.ipynb
