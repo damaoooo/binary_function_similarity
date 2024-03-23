@@ -61,3 +61,5 @@ test*.svg
 
 .idea
 *.zip
+
+*log*
