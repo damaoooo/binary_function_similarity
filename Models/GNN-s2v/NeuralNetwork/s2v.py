@@ -203,7 +203,7 @@ def main():
     parser.add_argument(
         "--dataset",
         required=True,
-        choices=["one", "two", "vuln"],
+        choices=["one", "two", "vuln", "onestrip"],
         help="Choose the dataset to use for the train or test",
     )
 

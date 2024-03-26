@@ -63,3 +63,10 @@ test*.svg
 *.zip
 
 *log*
+
+*.data*
+*.index
+*.meta
+*checkpoint*
+*.txt
+*.npy

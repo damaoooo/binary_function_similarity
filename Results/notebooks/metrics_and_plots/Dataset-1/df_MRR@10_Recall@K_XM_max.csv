@@ -1,0 +1,2 @@
+model_name,Recall@1,Recall@5,Recall@10,Recall@15,Recall@20,Recall@25,Recall@30,Recall@35,Recall@40,Recall@45,Recall@50,MRR@10
+sim,0.27,0.445,0.55,0.595,0.645,0.705,0.75,0.78,0.79,0.815,0.84,0.3589880952380953
