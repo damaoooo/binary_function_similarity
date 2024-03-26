@@ -103,7 +103,8 @@ def create_graph(nodes, edges):
         G.add_edge(edge[0], edge[1])
 
     nodelist = list(G.nodes())
-    adj_mat = nx.to_numpy_matrix(G, nodelist=nodelist, dtype=np.int8)
+    adj_mat = nx.to_numpy_array(G, nodelist=nodelist, dtype=np.int8)
+    adj_mat = np.mat(adj_mat)
     return adj_mat, nodelist
 
 

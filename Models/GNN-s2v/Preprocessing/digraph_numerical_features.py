@@ -47,6 +47,8 @@ from multiprocessing import Pool
 from scipy.sparse import coo_matrix
 from tqdm import tqdm
 
+import multiprocessing
+
 # Number of numerical features
 NUM_ACFG_FEATURES = 8
 
@@ -72,7 +74,8 @@ def create_graph(node_list, edge_list):
             G.add_edge(edge[0], edge[1])
 
     node_list = list(G.nodes())
-    adj_mat = nx.to_numpy_matrix(G, nodelist=node_list, dtype=np.int8)
+    adj_mat = nx.to_numpy_array(G, nodelist=node_list, dtype=np.int8)
+    adj_mat = np.matrix(adj_mat)
     return adj_mat, G
 
 
@@ -137,7 +140,7 @@ def betweenness_centrality_parallel(G, processes=None):
     return bt_c
 
 
-def create_features_matrix(G, fva_data, num_processes):
+def create_features_matrix(G, fva_data, num_processes=0):
     """
     Create the matrix with numerical features.
 
@@ -151,7 +154,7 @@ def create_features_matrix(G, fva_data, num_processes):
     """
     f_mat = list()
 
-    if G.order() > 200:
+    if G.order() > 200 and num_processes > 0:
         betweenness = betweenness_centrality_parallel(
             G, min(int(G.order() / 100), num_processes))
     else:
@@ -223,6 +226,93 @@ def np_to_scipy_sparse(np_mat):
     return mat_str
 
 
+def create_functions_dict_worker(f_path, worker_output_queue: multiprocessing.Queue):
+    
+    functions_dict = defaultdict(dict)
+    
+    with open(f_path) as f_in:
+        jj = json.load(f_in)
+
+        idb_path = list(jj.keys())[0]
+        # print("[D] Processing: {}".format(idb_path))
+        j_data = jj[idb_path]
+
+        # Iterate over each function
+        for fva in j_data:
+            fva_data = j_data[fva]
+
+            g_mat, G = create_graph(
+                fva_data['nodes'], fva_data['edges'])
+            f_mat = create_features_matrix(G, fva_data)
+
+            graph_str = np_to_scipy_sparse(g_mat)
+            features_str = np_to_str(f_mat)
+
+            functions_dict[idb_path][fva] = {
+                'adj_mat': graph_str,
+                'features_mat': features_str
+            }
+            
+    worker_output_queue.put(functions_dict)
+    
+    
+def create_functions_dict_collector(worker_output_queue: multiprocessing.Queue):
+    functions_dict = defaultdict(dict)
+    
+    while True:
+        res = worker_output_queue.get()
+        
+        if isinstance(res, str) and res == 'STOP':
+            break
+        
+        functions_dict.update(res)
+            
+    worker_output_queue.put(functions_dict)
+
+
+def create_functions_dict_parallel(input_folder, num_processes=multiprocessing.cpu_count()):
+    """
+    Args
+        input_folder: a folder with JSON files from IDA_acfg_features
+        num_processes: number of parallel processes
+
+    Return
+        dict: a dictionary with serialized adj and features matrices
+    """
+
+    functions_dict = defaultdict(dict)
+    
+    worker_output_queue = multiprocessing.Manager().Queue()
+    collector_process = multiprocessing.Process(target=create_functions_dict_collector, args=(worker_output_queue,))
+    collector_process.daemon = True
+    collector_process.start()
+    
+    pool = multiprocessing.Pool(processes=num_processes - 1)
+    
+    bar = tqdm(os.listdir(input_folder), desc='Processing JSON files', dynamic_ncols=True)
+
+    for f_json in os.listdir(input_folder):
+        if not f_json.endswith(".json"):
+            bar.update(1)
+            continue
+
+        f_path = os.path.join(input_folder, f_json)
+        pool.apply_async(create_functions_dict_worker, (f_path, worker_output_queue), callback=lambda _: bar.update(1))
+        
+    pool.close()
+    pool.join()
+    
+    worker_output_queue.put('STOP')
+    collector_process.join()
+    
+    while not worker_output_queue.empty():
+        res = worker_output_queue.get()
+        if isinstance(res, dict):
+            functions_dict.update(res)
+
+    return functions_dict
+    
+
 def create_functions_dict(input_folder, num_processes):
     """
     Args
@@ -282,7 +372,7 @@ def main(input_dir, output_dir, num_processes):
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
 
-    o_dict = create_functions_dict(input_dir, num_processes)
+    o_dict = create_functions_dict_parallel(input_dir)
     output_path = os.path.join(output_dir,
                                'digraph_numerical_features.json')
     with open(output_path, 'w') as f_out:
