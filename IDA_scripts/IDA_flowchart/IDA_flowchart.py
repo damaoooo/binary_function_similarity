@@ -145,7 +145,7 @@ def analyze_functions(idb_path, output_csv):
         csv_out.write(",".join(COLUMNS) + "\n")
 
     print("[D] Output CSV: %s" % output_csv)
-
+    c = -1
     # For each function in the list
     for c, fva in enumerate(idautils.Functions()):
         try:

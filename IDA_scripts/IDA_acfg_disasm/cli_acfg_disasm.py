@@ -47,7 +47,7 @@ from os.path import dirname
 from os.path import isfile
 from os.path import join
 
-IDA_PATH = getenv("IDA_PATH", "/home/sentry2/idapro-7.7/idat64")
+IDA_PATH = getenv("IDA_PATH", "/home/damaoooo/ida-pro-9.1/idat")
 IDA_PLUGIN = join(dirname(abspath(__file__)), 'IDA_acfg_disasm.py')
 REPO_PATH = dirname(dirname(dirname(abspath(__file__))))
 LOG_PATH = "acfg_disasm_log.txt"
@@ -108,7 +108,7 @@ def main(json_path, output_dir):
                            output_dir),
                        idb_path]
 
-                # print("[D] cmd: {}".format(' '.join(cmd)))
+                print("[D] cmd: {}".format(' '.join(cmd)))
                 
                 commands.append(cmd)
 
