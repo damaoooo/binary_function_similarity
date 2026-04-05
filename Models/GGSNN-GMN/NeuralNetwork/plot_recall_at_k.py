@@ -20,7 +20,6 @@ import argparse
 import csv
 import math
 from pathlib import Path
-from statistics import median
 from textwrap import fill
 from typing import Dict
 from typing import Iterable
@@ -89,8 +88,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-k",
         type=int,
-        default=None,
-        help="Maximum K shown in the curve. Default: min(100, candidates_per_query).",
+        default=50,
+        help="Maximum K shown in the curve. Default: 50",
     )
     parser.add_argument(
         "--dpi",
@@ -305,6 +304,18 @@ def recall_at(rank_histogram: Sequence[int], k: int) -> float:
     return hits / total
 
 
+def mean_reciprocal_rank(rank_histogram: Sequence[int]) -> float:
+    total = sum(rank_histogram)
+    if total <= 0:
+        return 0.0
+    reciprocal_rank_sum = 0.0
+    for rank, count in enumerate(rank_histogram):
+        if rank == 0 or count == 0:
+            continue
+        reciprocal_rank_sum += count / rank
+    return reciprocal_rank_sum / total
+
+
 def format_percent(value: float) -> str:
     return f"{value * 100:.2f}%"
 
@@ -394,10 +405,8 @@ def plot_curve_grid(
         ax.set_xlabel("K", fontsize=11.5, color="#0f172a")
         ax.set_ylabel("Recall", fontsize=11.5, color="#0f172a")
 
-        ranks = histogram_to_ranks(rank_histogram)
         summary_lines = [
-            f"Episodes: {len(ranks):,}",
-            f"Median rank: {median(ranks):.0f}",
+            f"MRR: {mean_reciprocal_rank(rank_histogram):.4f}",
             f"R@1: {format_percent(recall_at(rank_histogram, 1))}",
             f"R@5: {format_percent(recall_at(rank_histogram, 5))}",
             f"R@10: {format_percent(recall_at(rank_histogram, 10))}",
@@ -445,8 +454,8 @@ def main() -> None:
     )
     candidates_per_query = negatives_per_positive + 1
 
-    max_k = args.max_k if args.max_k is not None else min(100, candidates_per_query)
-    if max_k <= 0:
+    max_k = args.max_k
+    if max_k is None or max_k <= 0:
         raise ValueError("--max-k must be > 0.")
     max_k = min(max_k, candidates_per_query)
 
@@ -499,6 +508,7 @@ def main() -> None:
         print(
             f"{label}: "
             + ", ".join(f"Recall@{k}={format_percent(value)}" for k, value in summary.items())
+            + f", MRR={mean_reciprocal_rank(rank_histogram):.4f}"
         )
 
 
