@@ -71,3 +71,5 @@ test*.svg
 *checkpoint*
 *.txt
 *.npy
+
+Models/**/*.png
