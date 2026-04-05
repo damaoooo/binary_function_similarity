@@ -35,38 +35,54 @@
 
 import json
 import os
-import shutil
 import unittest
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from gnn_preprocessing import get_top_opcodes
 from gnn_preprocessing import main
 from click.testing import CliRunner
 
 
 class TestGNNPreprocessing(unittest.TestCase):
 
-    def test_gnn_preprocessing(self):
-        input_dir = '/input/acfg_disasm'
-        opcodes_dict = '/input/opcodes_dict.json'
-        output_dir = '/output'
-        gt_path = '/input/gnn_gt.json'
+    @staticmethod
+    def get_testdata_dir():
+        return Path(__file__).resolve().parent / "testdata"
 
-        runner = CliRunner()
-        result = runner.invoke(
-            main,
-            ['-i', input_dir, '-d', opcodes_dict, '-o', output_dir])
-        self.assertEqual(result.exit_code, 0)
-        self.assertTrue(os.path.isdir(output_dir))
+    def run_gnn_preprocessing(self, workers):
+        testdata_dir = self.get_testdata_dir()
+        input_dir = str(testdata_dir / "acfg_disasm")
+        opcodes_dict = str(testdata_dir / "opcodes_dict.json")
+        gt_path = testdata_dir / "gnn_gt.json"
 
-        with open(gt_path) as f_in:
-            j_gt = json.load(f_in)
+        with TemporaryDirectory() as output_dir:
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                ['-i', input_dir, '-d', opcodes_dict, '-o', output_dir,
+                 '--workers', str(workers)])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertTrue(os.path.isdir(output_dir))
 
-        with open(os.path.join(output_dir, 'graph_func_dict_opc_200.json')) as f_in:
-            j_o = json.load(f_in)
-        self.assertDictEqual(j_gt, j_o)
+            with open(gt_path) as f_in:
+                j_gt = json.load(f_in)
 
-        # Cleanup files
-        for file in os.scandir(output_dir):
-            if os.path.isfile(file.path):
-                os.remove(file.path)
-            else:
-                shutil.rmtree(file.path)
+            with open(os.path.join(output_dir,
+                                   'graph_func_dict_opc_200.json')) as f_in:
+                j_o = json.load(f_in)
+            self.assertDictEqual(j_gt, j_o)
+
+    def test_gnn_preprocessing_single_worker(self):
+        self.run_gnn_preprocessing(workers=1)
+
+    def test_gnn_preprocessing_multi_worker(self):
+        self.run_gnn_preprocessing(workers=2)
+
+    def test_get_top_opcodes_multi_worker(self):
+        testdata_dir = self.get_testdata_dir()
+        input_dir = str(testdata_dir / "acfg_disasm")
+        j_single = get_top_opcodes(input_dir, 200, workers=1)
+        j_multi = get_top_opcodes(input_dir, 200, workers=2)
+        self.assertDictEqual(j_single, j_multi)
