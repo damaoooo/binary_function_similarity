@@ -38,6 +38,7 @@ The **input** of `digraph_instructions_embeddings.py` is a folder with the JSON 
 The script will produce the following **output**:
 - A file called `digraph_instructions_embeddings_{NUM_INSTRUCTIONS}.json` that contains the graph representation and the features for each selected function
 - A log file called `log_coverage.txt` that provides information about the frequency of unknown instructions.
+- Use `-p` / `--num-processes` to control the number of worker processes used during preprocessing. This is useful to limit CPU and memory usage on shared machines.
 
 ### Preprocessing for the model presented in "Neural network-based graph embedding for cross-platform binary code similarity detection."
 
@@ -49,6 +50,7 @@ The **input** of `digraph_numerical_features.py` is a folder with the JSON files
 
 The script will produce the following **output**:
 - A file called `digraph_numerical_features.json` that contains the graph representation and the features for each selected function.
+- Use `-p` / `--num-processes` to control the number of worker processes used during preprocessing. This is useful to limit CPU and memory usage on shared machines.
 
 
 ### Instructions with Docker
@@ -68,6 +70,7 @@ docker run \
     -it gnn-s2v-preprocessing /code/digraph_instructions_embeddings.py \
         -i /input \
         -d /instruction_embeddings/ins2id.json \
+        -p 8 \
         -o /output/
 ```
 
@@ -78,8 +81,11 @@ docker run \
     -v <path_to_the_output_dir>:/output \
     -it gnn-s2v-preprocessing /code/digraph_numerical_features.py \
         -i /input \
+        -p 8 \
         -o /output
 ```
+
+Adjust `-p` to match the machine you are using. Smaller values reduce resource usage, larger values can improve throughput when many JSON files are processed.
 
 You can see all options of the two scripts with:
 ```bash
@@ -102,6 +108,7 @@ docker run \
     -it gnn-s2v-preprocessing /code/digraph_instructions_embeddings.py \
         -i /input \
         -d /instruction_embeddings/ins2id.json \
+        -p 8 \
         -o /output/Dataset-Vulnerability/
 ```
 
@@ -113,6 +120,7 @@ docker run \
     -v $(pwd)/Preprocessing/:/output \
     -it gnn-s2v-preprocessing /code/digraph_numerical_features.py \
         -i /input \
+        -p 8 \
         -o /output/Dataset-Vulnerability/
 ```
 ---

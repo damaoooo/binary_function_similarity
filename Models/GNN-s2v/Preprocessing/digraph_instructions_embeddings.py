@@ -46,6 +46,41 @@ from tqdm import tqdm
 
 import multiprocessing
 
+WORKER_INS2ID_DICT = None
+WORKER_MAX_INSTRUCTIONS = None
+
+
+def iter_json_paths(input_folder):
+    """Return the input JSON files in a deterministic order."""
+    return [
+        os.path.join(input_folder, f_json)
+        for f_json in sorted(os.listdir(input_folder))
+        if f_json.endswith(".json")
+    ]
+
+
+def normalize_num_processes(num_processes):
+    """Clamp the worker count to a sensible minimum."""
+    return max(1, int(num_processes))
+
+
+def merge_idb_functions(functions_dict, idb_path, idb_functions):
+    """Merge the processed functions for a single IDB."""
+    functions_dict[idb_path].update(idb_functions)
+
+
+def load_ins2id_dict(ins2id_json):
+    """Load the instruction vocabulary used by the workers."""
+    ins2id_dict = None
+    if os.path.isfile(ins2id_json):
+        with open(ins2id_json) as f_in:
+            ins2id_dict = json.load(f_in)
+    if not ins2id_dict:
+        print("[!] Error loading {}".format(ins2id_json))
+        return None
+    return ins2id_dict
+
+
 def create_graph(node_list, edge_list):
     """
     Create a Networkx direct graph from the list of nodes and edges.
@@ -68,7 +103,7 @@ def create_graph(node_list, edge_list):
 
     node_list = list(G.nodes())
     adj_mat = nx.to_numpy_array(G, nodelist=node_list, dtype=np.int8)
-    adj_mat = np.mat(adj_mat)
+    adj_mat = np.asmatrix(adj_mat)
     return adj_mat, node_list
 
 
@@ -129,43 +164,49 @@ def np_to_scipy_sparse(np_mat):
     return mat_str
 
 
-def create_functions_dict_worker(json_path, ins2id_dict, max_instructions, worker_output_channel: multiprocessing.Queue):
-    functions_dict = defaultdict(dict)
-    with open(json_path) as f_in:
-        jj = json.load(f_in)
+def create_functions_dict_entry(json_path, ins2id_dict, max_instructions):
+    """Process a single JSON file and return the serialized functions."""
+    idb_functions = dict()
+
+    try:
+        with open(json_path) as f_in:
+            jj = json.load(f_in)
 
         idb_path = list(jj.keys())[0]
-        # print("[D] Processing: {}".format(idb_path))
         j_data = jj[idb_path]
-        del j_data["arch"]
+        j_data.pop("arch", None)
 
         # Iterate over each function
         for fva in j_data:
             fva_data = j_data[fva]
 
             g_mat, nodes = create_graph(fva_data["nodes"], fva_data["edges"])
-            graph_str = np_to_scipy_sparse(g_mat)
-            features_str = convert_instructions(
-                nodes, fva_data, ins2id_dict, max_instructions
-            )
-
-            functions_dict[idb_path][fva] = {
-                "adj_mat": graph_str,
-                "features_mat": features_str,
+            idb_functions[fva] = {
+                "adj_mat": np_to_scipy_sparse(g_mat),
+                "features_mat": convert_instructions(
+                    nodes, fva_data, ins2id_dict, max_instructions
+                ),
             }
 
-    worker_output_channel.put(functions_dict)
-    
-def create_functions_dict_collectors(workers_output_channel: multiprocessing.Queue):
-    functions_dict = defaultdict(dict)
-    while True:
-        res = workers_output_channel.get()
-        if isinstance(res, str) and res == "STOP":
-            break
-        
-        functions_dict.update(res)
-        
-    workers_output_channel.put(functions_dict)
+        return idb_path, idb_functions
+    except Exception as exc:
+        raise RuntimeError(
+            "[!] Exception while processing {}: {}".format(
+                json_path, exc)) from exc
+
+
+def init_worker(ins2id_dict, max_instructions):
+    """Initialize shared worker state once per process."""
+    global WORKER_INS2ID_DICT
+    global WORKER_MAX_INSTRUCTIONS
+    WORKER_INS2ID_DICT = ins2id_dict
+    WORKER_MAX_INSTRUCTIONS = max_instructions
+
+
+def create_functions_dict_worker(json_path):
+    """Pool worker for file-level parallel preprocessing."""
+    return create_functions_dict_entry(
+        json_path, WORKER_INS2ID_DICT, WORKER_MAX_INSTRUCTIONS)
     
     
 def create_functions_dict_parallel(input_folder, ins2id_json, max_instructions, num_processes=multiprocessing.cpu_count()):
@@ -176,52 +217,37 @@ def create_functions_dict_parallel(input_folder, ins2id_json, max_instructions, 
         input_folder: a folder with JSON files from IDA_acfg_disasm
         ins2id_dict: a dictionary that maps instructions to numerical IDs
         max_instructions: maximum number of instructions per basic block
-        num_processes [Optinal]: number of parallel processes. n-1 worker and 1 collector process 
+        num_processes: number of worker processes for file-level parallelism
 
     Return
         dict: a dictionary with serialized adj and features matrices
     """
 
-    ins2id_dict = None
-    # Map normalized instructions to indexes in the embedding matrix
-    if os.path.isfile(ins2id_json):
-        with open(ins2id_json) as f_in:
-            ins2id_dict = json.load(f_in)
+    ins2id_dict = load_ins2id_dict(ins2id_json)
     if not ins2id_dict:
-        print("[!] Error loading {}".format(ins2id_json))
         return dict()
 
     functions_dict = defaultdict(dict)
+    json_paths = iter_json_paths(input_folder)
 
-    bar = tqdm(total=len(os.listdir(input_folder)), desc='Processing IDBs', dynamic_ncols=True)
-    
-    worker_output_channel = multiprocessing.Manager().Queue(maxsize=num_processes)
-    
-    collector_process = multiprocessing.Process(target=create_functions_dict_collectors, args=(worker_output_channel,))
-    collector_process.daemon = True
-    collector_process.start()
-    
-    pool = multiprocessing.Pool(processes=num_processes-1)
+    if not json_paths:
+        return functions_dict
 
-    for f_json in os.listdir(input_folder):
-        if not f_json.endswith(".json"):
-            bar.update(1)
-            continue
-        
-        pool.apply_async(create_functions_dict_worker, (os.path.join(input_folder, f_json), ins2id_dict, max_instructions, worker_output_channel), callback=lambda _: bar.update(1))
-        
-    pool.close()
-    pool.join()
-    
-    worker_output_channel.put("STOP")
-    collector_process.join()
-    
-    while not worker_output_channel.empty():
-        res = worker_output_channel.get()
-        if isinstance(res, dict):
-            functions_dict.update(res)
-            break
-        
+    workers = min(normalize_num_processes(num_processes), len(json_paths))
+    if workers == 1:
+        return create_functions_dict(input_folder, ins2id_json, max_instructions)
+
+    with multiprocessing.Pool(
+            processes=workers,
+            initializer=init_worker,
+            initargs=(ins2id_dict, max_instructions)) as pool:
+        for idb_path, idb_functions in tqdm(
+                pool.imap_unordered(create_functions_dict_worker, json_paths),
+                total=len(json_paths),
+                desc='Processing IDBs',
+                dynamic_ncols=True):
+            merge_idb_functions(functions_dict, idb_path, idb_functions)
+
     return functions_dict
 
 
@@ -238,44 +264,18 @@ def create_functions_dict(input_folder, ins2id_json, max_instructions):
         dict: a dictionary with serialized adj and features matrices
     """
     try:
-        ins2id_dict = None
-        # Map normalized instructions to indexes in the embedding matrix
-        if os.path.isfile(ins2id_json):
-            with open(ins2id_json) as f_in:
-                ins2id_dict = json.load(f_in)
+        ins2id_dict = load_ins2id_dict(ins2id_json)
         if not ins2id_dict:
-            print("[!] Error loading {}".format(ins2id_json))
             return dict()
 
         functions_dict = defaultdict(dict)
-
-        for f_json in tqdm(os.listdir(input_folder)):
-            if not f_json.endswith(".json"):
-                continue
-
-            json_path = os.path.join(input_folder, f_json)
-            with open(json_path) as f_in:
-                jj = json.load(f_in)
-
-                idb_path = list(jj.keys())[0]
-                print("[D] Processing: {}".format(idb_path))
-                j_data = jj[idb_path]
-                del j_data["arch"]
-
-                # Iterate over each function
-                for fva in j_data:
-                    fva_data = j_data[fva]
-
-                    g_mat, nodes = create_graph(fva_data["nodes"], fva_data["edges"])
-                    graph_str = np_to_scipy_sparse(g_mat)
-                    features_str = convert_instructions(
-                        nodes, fva_data, ins2id_dict, max_instructions
-                    )
-
-                    functions_dict[idb_path][fva] = {
-                        "adj_mat": graph_str,
-                        "features_mat": features_str,
-                    }
+        for json_path in tqdm(
+                iter_json_paths(input_folder),
+                desc="Processing IDBs",
+                dynamic_ncols=True):
+            idb_path, idb_functions = create_functions_dict_entry(
+                json_path, ins2id_dict, max_instructions)
+            merge_idb_functions(functions_dict, idb_path, idb_functions)
         return functions_dict
 
     except Exception as e:
@@ -326,13 +326,22 @@ def log_instructions_coverage(functions_dict, output_dir):
     default=200,
     help="Maximum instructions per basic blocks.",
 )
+@click.option(
+    "-p",
+    "--num-processes",
+    default=multiprocessing.cpu_count(),
+    show_default=True,
+    type=int,
+    help="Maximum number of processes.",
+)
 @click.option("-o", "--output-dir", required=True, help="Output directory.")
-def main(input_dir, ins2id_json, max_instructions, output_dir):
+def main(input_dir, ins2id_json, max_instructions, num_processes, output_dir):
     # Create output directory if it doesn't exist
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
 
-    o_dict = create_functions_dict_parallel(input_dir, ins2id_json, max_instructions)
+    o_dict = create_functions_dict_parallel(
+        input_dir, ins2id_json, max_instructions, num_processes)
     o_json = "digraph_instructions_embeddings_{}.json".format(max_instructions)
     output_path = os.path.join(output_dir, o_json)
     with open(output_path, "w") as f_out:
