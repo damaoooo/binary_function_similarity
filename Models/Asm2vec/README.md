@@ -31,6 +31,8 @@ These are the concrete steps to run the analysis within the provided Docker cont
 docker build -t asm2vec .
 ```
 
+If you modify [`i2v.py`](i2v.py), [`i2v_preprocessing.py`](i2v_preprocessing.py), or [`asm2vec.patch`](asm2vec.patch), rebuild the Docker image before running the examples below.
+
 2. Run the [i2v_preprocessing.py](i2v_preprocessing.py) script within the docker container:
 ```bash
 docker run --rm -v <path_to_the_acfg_disasm_dir>:/input -v <path_to_the_output_dir>:/output -it asm2vec /code/i2v_preprocessing.py -d [--workers 4] [-a2v, -d2v] -i /input -o /output/
@@ -70,6 +72,8 @@ There are a number of configurable parameters, such as:
 - Select `--train`, or `--inference` mode
 - Configure the number of epochs via the `--epochs` parameter
 - Use the `--workers` option to select the number of parallel workers to use.
+- Use `--queue-factor`, `--corpus-batch-size`, and `--corpus-prefetch-batches` to tune the streaming input pipeline for large datasets
+- Use `--progress-interval` to print corpus-feed progress, throughput and ETA during long epochs
 
 The code of [`i2v.py`](i2v.py) contains others hardcoded parameters that are marked as `# FIXED PARAM`. Experimenting with different values for those parameters has to be studied.
 
@@ -88,7 +92,7 @@ The similarity between two functions is computed using the cosine similarity bet
 ### Instructions with Docker
 1. Run the neural network model
 ```bash
-docker run --rm -v <path_to_i2v_preprocessing_output_folder>:/input -v $(pwd):/output -it asm2vec /code/i2v.py -d [--asm2vec, --pvdm, --pvdbow] [--train, --inference, --log] -e1 -w4 --inputdir /input/ -o /output/output_folder
+docker run --rm -v <path_to_i2v_preprocessing_output_folder>:/input -v $(pwd):/output -it asm2vec /code/i2v.py -d [--asm2vec, --pvdm, --pvdbow] [--train, --inference, --log] -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -o /output/output_folder
 ```
 
 You can see all the command line options using:
@@ -98,13 +102,19 @@ docker run --rm -it asm2vec /code/i2v.py --help
 
 Example (1): train the Asm2vec model on Dataset-1.
 ```bash
-docker run --rm -v $(pwd)/a2v_preprocessing_Dataset-1-training:/input -v $(pwd):/output -it asm2vec /code/i2v.py -d --asm2vec --train -e1 -w4 --inputdir /input/ -o /output/asm2vec_train_Dataset-1-training
+docker run --rm -v $(pwd)/a2v_preprocessing_Dataset-1-training:/input -v $(pwd):/output -it asm2vec /code/i2v.py -d --asm2vec --train -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -o /output/asm2vec_train_Dataset-1-training
 ```
 
 Example (2): run the Asm2vec model in inference mode on the testing data of Dataset-1.
 ```bash
-docker run --rm -v $(pwd)/a2v_preprocessing_Dataset-1-testing:/input -v $(pwd)/asm2vec_train_Dataset-1-training:/checkpoint -v $(pwd):/output -it asm2vec /code/i2v.py -d --asm2vec --inference -e1 -w4 --inputdir /input/ -c /checkpoint -o /output/asm2vec_inference_Dataset-1-testing
+docker run --rm -v $(pwd)/a2v_preprocessing_Dataset-1-testing:/input -v $(pwd)/asm2vec_train_Dataset-1-training:/checkpoint -v $(pwd):/output -it asm2vec /code/i2v.py -d --asm2vec --inference -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -c /checkpoint -o /output/asm2vec_inference_Dataset-1-testing
 ```
+
+For large datasets such as Dataset-1, the command above is a good starting point on a 32-thread CPU. In our tests it was more stable than simply increasing `--workers` to 32. If the host starts to look underutilized, try `--workers 24`; if the input pipeline becomes unstable, fall back to `--workers 12`.
+
+When no validation CSVs are configured, [`i2v.py`](i2v.py) now logs `Validation skipped` and exits cleanly after writing the checkpoint or embeddings.
+
+Use a fresh output directory for each run, otherwise `i2v.log` will append to the previous log and make the training timeline harder to read.
 
 ## How to use Asm2vec and Doc2vec models on a new dataset of functions
 
@@ -131,5 +141,3 @@ The following are the main steps that are needed to run the Asm2vec and Doc2vec 
 
 ## Copyright information about Gensim
 [Gensim](https://github.com/RaRe-Technologies/gensim) is released under LGPL-2.1 license.
-
-

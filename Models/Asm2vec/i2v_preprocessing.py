@@ -255,8 +255,8 @@ def generate_instruction_sequences(random_walk, blocks_dict, max_walk_tokens):
             instructions_list.append(instruction)
 
             # max_walk_tokens is the upper limit
-            if len(instructions_list) > max_walk_tokens:
-                break
+            if len(instructions_list) >= max_walk_tokens:
+                return instructions_list
 
     return instructions_list
 
@@ -421,15 +421,14 @@ def save_rwalks_to_file_inner(asm2vec, max_tokens, functions_dict,
             for ins in rand_walk:
                 new_ins = [
                     x if x in vocabulary else 'UNK' for x in ins]
+                if cnt_rand_walk + len(new_ins) > max_tokens:
+                    break
                 if asm2vec:
                     new_rand_walk.append('::'.join(new_ins))
                 else:
                     new_rand_walk.extend(new_ins)
 
-                # Approximated (the length can be a bit higher than max_tokens)
                 cnt_rand_walk += len(new_ins)
-                if cnt_rand_walk > max_tokens:
-                    break
 
             f_out.write("{},{}\n".format(_id, ";".join(new_rand_walk)))
 

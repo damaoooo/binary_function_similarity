@@ -40,11 +40,13 @@ import json
 import logging
 import os
 import pandas as pd
+import queue
 import sys
+import threading
+import time
 
 from scipy.spatial.distance import cosine
 from sklearn import metrics
-from tqdm import tqdm
 from gensim.models.asm2vec import Asm2Vec
 from gensim.models.asm2vec import Function
 from gensim.models.asm2vec import Instruction
@@ -53,7 +55,7 @@ from gensim.models.doc2vec import Doc2Vec
 from gensim.models.doc2vec import TaggedDocument
 
 log = None
-doc_keys = None
+CORPUS_QUEUE_SENTINEL = object()
 
 
 def positive_int(value):
@@ -62,6 +64,15 @@ def positive_int(value):
     if ivalue < 1:
         raise argparse.ArgumentTypeError(
             "{} is invalid, expected an integer >= 1".format(value))
+    return ivalue
+
+
+def non_negative_int(value):
+    """Argparse helper for integers >= 0."""
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(
+            "{} is invalid, expected an integer >= 0".format(value))
     return ivalue
 
 
@@ -169,7 +180,167 @@ class GensimLogCallback(CallbackAny2Vec):
         self._time = model.total_train_time
 
 
-def run_gensim_training_doc2vec(doc_list, config, func2id, tokens_freq):
+def iter_random_walk_records(rand_walks_path):
+    """Yield valid random-walk rows from the CSV in a stable order."""
+    with open(rand_walks_path, buffering=1024 * 1024) as f_in:
+        # Skip CSV header.
+        next(f_in, None)
+        for line_num, raw_line in enumerate(f_in, start=2):
+            raw_line = raw_line.rstrip("\r\n")
+            if not raw_line:
+                continue
+
+            try:
+                func_id_str, random_walk = raw_line.split(",", 1)
+            except ValueError:
+                log.warning(
+                    "[!] Skipping malformed random walk line %d in %s",
+                    line_num,
+                    rand_walks_path)
+                continue
+
+            if not func_id_str or not random_walk:
+                continue
+
+            yield int(func_id_str), random_walk
+
+
+def count_random_walks(rand_walks_path):
+    """Count valid random walks in the CSV."""
+    log.info("[*] Counting random walks: {}".format(rand_walks_path))
+    random_walks_count = sum(1 for _ in iter_random_walk_records(rand_walks_path))
+    log.info("\tFound {} random walks".format(random_walks_count))
+    return random_walks_count
+
+
+class RandomWalkCorpusBase(object):
+    """Re-iterable streaming corpus backed by the random-walk CSV."""
+
+    def __init__(self, rand_walks_path, batch_size=64, prefetch_batches=4,
+                 total_documents=None, progress_interval=100000):
+        self._rand_walks_path = rand_walks_path
+        self._batch_size = max(1, int(batch_size))
+        self._prefetch_batches = max(0, int(prefetch_batches))
+        self._total_documents = total_documents
+        self._progress_interval = max(1, int(progress_interval))
+        self._iteration_index = 0
+
+    def _log_progress(self, epoch_idx, processed, started_at, finished=False):
+        """Emit corpus feed progress with rate and ETA."""
+        elapsed = max(time.monotonic() - started_at, 1e-9)
+        rate = processed / elapsed
+        suffix = "completed" if finished else "progress"
+
+        if self._total_documents:
+            percentage = (processed / float(self._total_documents)) * 100.0
+            remaining = max(self._total_documents - processed, 0)
+            eta_seconds = 0.0 if rate <= 0 else remaining / rate
+            log.info(
+                "[*] Epoch %d corpus %s: %d/%d (%.2f%%), %.0f walks/s, ETA %.0fs",
+                epoch_idx,
+                suffix,
+                processed,
+                self._total_documents,
+                percentage,
+                rate,
+                eta_seconds)
+        else:
+            log.info(
+                "[*] Epoch %d corpus %s: %d walks, %.0f walks/s",
+                epoch_idx,
+                suffix,
+                processed,
+                rate)
+
+    def _iter_batches(self):
+        batch = list()
+        for func_id, random_walk in iter_random_walk_records(self._rand_walks_path):
+            batch.append(self._build_document(func_id, random_walk))
+            if len(batch) >= self._batch_size:
+                yield batch
+                batch = list()
+
+        if batch:
+            yield batch
+
+    def __iter__(self):
+        epoch_idx = self._iteration_index
+        self._iteration_index += 1
+        processed = 0
+        next_progress = self._progress_interval
+        started_at = time.monotonic()
+
+        log.info("[*] Epoch %d corpus feed started", epoch_idx)
+
+        if self._prefetch_batches == 0:
+            for batch in self._iter_batches():
+                processed += len(batch)
+                if processed >= next_progress:
+                    self._log_progress(epoch_idx, processed, started_at)
+                    next_progress += self._progress_interval
+                for document in batch:
+                    yield document
+            self._log_progress(epoch_idx, processed, started_at, finished=True)
+            return
+
+        batch_queue = queue.Queue(maxsize=self._prefetch_batches)
+        producer_error = list()
+
+        def producer():
+            try:
+                for batch in self._iter_batches():
+                    batch_queue.put(batch)
+            except Exception as exc:
+                producer_error.append(exc)
+            finally:
+                batch_queue.put(CORPUS_QUEUE_SENTINEL)
+
+        producer_thread = threading.Thread(
+            target=producer,
+            name="random-walk-prefetch",
+            daemon=True)
+        producer_thread.start()
+
+        while True:
+            batch = batch_queue.get()
+            if batch is CORPUS_QUEUE_SENTINEL:
+                break
+            processed += len(batch)
+            if processed >= next_progress:
+                self._log_progress(epoch_idx, processed, started_at)
+                next_progress += self._progress_interval
+            for document in batch:
+                yield document
+
+        producer_thread.join()
+        if producer_error:
+            raise producer_error[0]
+        self._log_progress(epoch_idx, processed, started_at, finished=True)
+
+    def _build_document(self, func_id, random_walk):
+        raise NotImplementedError
+
+
+class TaggedDocumentCorpus(RandomWalkCorpusBase):
+    """Stream random walks as Gensim TaggedDocument objects."""
+
+    def _build_document(self, func_id, random_walk):
+        return TaggedDocument(random_walk.split(";"), [func_id])
+
+
+class Asm2VecFunctionCorpus(RandomWalkCorpusBase):
+    """Stream random walks as Gensim Function objects."""
+
+    def _build_document(self, func_id, random_walk):
+        instructions = list()
+        for ins in random_walk.split(";"):
+            ins_splits = ins.split("::")
+            instructions.append(Instruction(ins_splits[0], ins_splits[1:]))
+        return Function(instructions, [func_id])
+
+
+def run_gensim_training_doc2vec(doc_list, config, func2id,
+                                tokens_freq, corpus_count):
     """
     Gensim training with Doc2Vec.
 
@@ -178,6 +349,7 @@ def run_gensim_training_doc2vec(doc_list, config, func2id, tokens_freq):
         config: model configuration dictionary
         func2id: a dictionary that maps functions to numerical IDs
         tokens_freq: a dictionary with tokens frequency information
+        corpus_count: number of random walks/documents in the corpus
 
     Return
         Gensim Doc2Vec model
@@ -206,17 +378,18 @@ def run_gensim_training_doc2vec(doc_list, config, func2id, tokens_freq):
     model.build_vocab_from_freq(
         word_freq=tokens_freq,
         keep_raw_vocab=False,
-        corpus_count=len(tokens_freq))
+        corpus_count=corpus_count)
 
     log.info("[*] Training started")
     model.train(
         documents=doc_list,
         corpus_file=None,
-        total_examples=model.corpus_count,
+        total_examples=corpus_count,
         total_words=None,
         epochs=config['epochs'],
         start_alpha=model.alpha,
         end_alpha=model.min_alpha,
+        queue_factor=config['queue_factor'],
         callbacks=[GensimLogCallback(config, func2id)])
 
     log.info(" ")
@@ -233,7 +406,8 @@ def run_gensim_training_doc2vec(doc_list, config, func2id, tokens_freq):
     return model
 
 
-def run_gensim_training_asm2vec(func_list, config, func2id, tokens_freq):
+def run_gensim_training_asm2vec(func_list, config, func2id,
+                                tokens_freq, corpus_count):
     """
     Gensim training with Asm2Vec.
 
@@ -242,6 +416,7 @@ def run_gensim_training_asm2vec(func_list, config, func2id, tokens_freq):
         config: model configuration dictionary
         func2id: a dictionary that maps functions to numerical IDs
         tokens_freq: a dictionary with tokens frequency information
+        corpus_count: number of random walks/documents in the corpus
 
     Return
         Gensim Asm2Vec model
@@ -266,17 +441,18 @@ def run_gensim_training_asm2vec(func_list, config, func2id, tokens_freq):
     model.build_vocab_from_freq(
         word_freq=tokens_freq,
         keep_raw_vocab=False,
-        corpus_count=len(tokens_freq))
+        corpus_count=corpus_count)
 
     log.info("[*] Training started")
     model.train(
         documents=func_list,
         corpus_file=None,
-        total_examples=model.corpus_count,
+        total_examples=corpus_count,
         total_words=None,
         epochs=config['epochs'],
         start_alpha=model.alpha,
         end_alpha=model.min_alpha,
+        queue_factor=config['queue_factor'],
         callbacks=[GensimLogCallback(config, func2id)])
 
     log.info(" ")
@@ -294,7 +470,7 @@ def run_gensim_training_asm2vec(func_list, config, func2id, tokens_freq):
 
 
 def run_gensim_inference_doc2vec(doc_list, config,
-                                 func2id, checkpoint_model):
+                                 func2id, checkpoint_model, corpus_count):
     """
     Run Doc2vec inference.
 
@@ -303,6 +479,7 @@ def run_gensim_inference_doc2vec(doc_list, config,
         config: model configuration dictionary
         func2id: a dictionary that maps functions to numerical IDs
         checkpoint_model: the trained model
+        corpus_count: number of random walks/documents in the inference corpus
 
     Return
         Gensim.Doc2Vec: the (new) model after inference
@@ -341,11 +518,12 @@ def run_gensim_inference_doc2vec(doc_list, config,
     new_model.train(
         documents=doc_list,
         corpus_file=None,
-        total_examples=checkpoint_model.corpus_count,
+        total_examples=corpus_count,
         total_words=None,
         epochs=config['epochs'],
         start_alpha=new_model.alpha,
         end_alpha=new_model.min_alpha,
+        queue_factor=config['queue_factor'],
         callbacks=[GensimLogCallback(config, func2id)])
 
     log.info(" ")
@@ -362,7 +540,8 @@ def run_gensim_inference_doc2vec(doc_list, config,
     return new_model
 
 
-def run_gensim_inference_asm2vec(func_list, config, func2id, checkpoint_model):
+def run_gensim_inference_asm2vec(func_list, config, func2id,
+                                 checkpoint_model, corpus_count):
     """
     Run Asm2vec inference.
 
@@ -371,6 +550,7 @@ def run_gensim_inference_asm2vec(func_list, config, func2id, checkpoint_model):
         config: model configuration dictionary
         func2id: a dictionary that maps functions to numerical IDs
         checkpoint_model: the trained model
+        corpus_count: number of random walks/documents in the inference corpus
 
     Return
         Gensim.Doc2Vec: the (new) model after inference
@@ -405,11 +585,12 @@ def run_gensim_inference_asm2vec(func_list, config, func2id, checkpoint_model):
     new_model.train(
         documents=func_list,
         corpus_file=None,
-        total_examples=checkpoint_model.corpus_count,
+        total_examples=corpus_count,
         total_words=None,
         epochs=config['epochs'],
         start_alpha=new_model.alpha,
         end_alpha=new_model.min_alpha,
+        queue_factor=config['queue_factor'],
         callbacks=[GensimLogCallback(config, func2id)])
 
     log.info(" ")
@@ -424,73 +605,6 @@ def run_gensim_inference_asm2vec(func_list, config, func2id, checkpoint_model):
     log.info("\t{}".format(new_model))
     log.info(" ")
     return new_model
-
-
-def read_rand_walks_csv(rand_walks_path):
-    """
-    Read random walks data and convert to a Pandas dataframe.
-
-    Args
-        rand_walks_path: path of the CSV file with random walks data
-
-    Return
-        pandas.DataFrame
-    """
-    log.info("[*] Loading random walks data: {}".format(rand_walks_path))
-    df_random_walks = pd.read_csv(rand_walks_path, index_col=0)
-
-    log.info("\tdf_random_walks shape: {}".format(df_random_walks.shape))
-    # Remove missing values
-    df_random_walks.dropna(inplace=True)
-    log.info("\tdf_random_walks shape: {}".format(df_random_walks.shape))
-    return df_random_walks
-
-
-def create_tagged_documents(df_random_walks):
-    """
-    Transorm the random walks into a list of Gensim.TaggedDocument.
-
-    Args
-        df_random_walks: a Pandas dataframe with random walks
-
-    Return
-        list: a list of Gensim.TaggedDocument
-    """
-    log.info("[*] Creating TaggedDocument list")
-    doc_list = list()
-    for func_id, row in tqdm(df_random_walks.iterrows(),
-                             total=df_random_walks.shape[0]):
-        tokens = row['random_walk'].split(";")
-        doc_list.append(TaggedDocument(tokens, [int(func_id)]))
-
-    log.info("\tProcessed {} random walks.".format(len(doc_list)))
-    return doc_list
-
-
-def create_gensim_functions_list(df_random_walks):
-    """
-    Transorm the random walks into a list of Gensim.Functions.
-
-    Args
-        df_random_walks: a Pandas dataframe with random walks
-
-    Return
-        list: a list of Gensim.Functions
-    """
-    log.info("[*] Creating a list of Gensim.Functions")
-    func_list = list()
-    for func_id, row in tqdm(df_random_walks.iterrows(),
-                             total=df_random_walks.shape[0]):
-        f = list()
-        instructions = row['random_walk'].split(";")
-        for ins in instructions:
-            ins_splits = ins.split("::")
-            f.append(Instruction(ins_splits[0], ins_splits[1:]))
-        # Function is a custom class that operates similarly to TaggedDocument
-        func_list.append(Function(f, [int(func_id)]))
-
-    log.info("\tProcessed {} random walks.".format(len(func_list)))
-    return func_list
 
 
 def cosine_similarity(e1, e2):
@@ -593,18 +707,33 @@ def model_training(config, func2id, args):
     """
     with open(config['training']['tokens_counter_path']) as f_in:
         tokens_freq = json.load(f_in)
-    df_random_walks = read_rand_walks_csv(config['rwalks_path'])
+    random_walks_count = count_random_walks(config['rwalks_path'])
+    if random_walks_count == 0:
+        raise ValueError("No random walks found in {}".format(
+            config['rwalks_path']))
+    log.info("[*] Streaming random walks data: {}".format(
+        config['rwalks_path']))
 
     if config['model_name'] != 'asm2vec':
         # doc2vec
-        rwalks_list = create_tagged_documents(df_random_walks)
+        rwalks_list = TaggedDocumentCorpus(
+            config['rwalks_path'],
+            batch_size=config['corpus_batch_size'],
+            prefetch_batches=config['corpus_prefetch_batches'],
+            total_documents=random_walks_count,
+            progress_interval=config['progress_interval'])
         model = run_gensim_training_doc2vec(
-            rwalks_list, config, func2id, tokens_freq)
+            rwalks_list, config, func2id, tokens_freq, random_walks_count)
     else:
         # asm2vec
-        functions = create_gensim_functions_list(df_random_walks)
+        functions = Asm2VecFunctionCorpus(
+            config['rwalks_path'],
+            batch_size=config['corpus_batch_size'],
+            prefetch_batches=config['corpus_prefetch_batches'],
+            total_documents=random_walks_count,
+            progress_interval=config['progress_interval'])
         model = run_gensim_training_asm2vec(
-            functions, config, func2id, tokens_freq)
+            functions, config, func2id, tokens_freq, random_walks_count)
 
     # Save the results
     write_model_checkpoint(
@@ -613,10 +742,14 @@ def model_training(config, func2id, args):
         args.outputdir)
 
     # Run validation
-    run_model_validation(
-        config, model, func2id,
-        config['validation']['positive_path'],
-        config['validation']['negative_path'])
+    if (config['validation']['positive_path']
+            and config['validation']['negative_path']):
+        run_model_validation(
+            config, model, func2id,
+            config['validation']['positive_path'],
+            config['validation']['negative_path'])
+    else:
+        log.info("[*] Validation skipped (no validation datasets configured)")
 
 
 def write_embeddings_to_file(emb_dict, outputdir):
@@ -656,18 +789,35 @@ def model_inference(config, func2id, args):
 
     # Restore model data
     checkpoint_model = load_model_checkpoint(args.checkpoint_dir, config)
+    random_walks_count = count_random_walks(config['rwalks_path'])
+    if random_walks_count == 0:
+        raise ValueError("No random walks found in {}".format(
+            config['rwalks_path']))
 
-    df_random_walks = read_rand_walks_csv(config['rwalks_path'])
+    log.info("[*] Streaming random walks data: {}".format(
+        config['rwalks_path']))
     if config['model_name'] != 'asm2vec':
         # doc2vec
-        rwalks_list = create_tagged_documents(df_random_walks)
+        rwalks_list = TaggedDocumentCorpus(
+            config['rwalks_path'],
+            batch_size=config['corpus_batch_size'],
+            prefetch_batches=config['corpus_prefetch_batches'],
+            total_documents=random_walks_count,
+            progress_interval=config['progress_interval'])
         inference_model = run_gensim_inference_doc2vec(
-            rwalks_list, config, func2id, checkpoint_model)
+            rwalks_list, config, func2id, checkpoint_model,
+            random_walks_count)
     else:
         # asm2vec
-        functions = create_gensim_functions_list(df_random_walks)
+        functions = Asm2VecFunctionCorpus(
+            config['rwalks_path'],
+            batch_size=config['corpus_batch_size'],
+            prefetch_batches=config['corpus_prefetch_batches'],
+            total_documents=random_walks_count,
+            progress_interval=config['progress_interval'])
         inference_model = run_gensim_inference_asm2vec(
-            functions, config, func2id, checkpoint_model)
+            functions, config, func2id, checkpoint_model,
+            random_walks_count)
 
     # Convert from int to func name.
     result_dict = dict()
@@ -712,6 +862,20 @@ def main():
     parser.add_argument('-w', '--workers', type=positive_int, default=2,
                         help='Number of workers to process the input')
 
+    parser.add_argument('--queue-factor', type=positive_int, default=8,
+                        help='Gensim training queue multiplier')
+
+    parser.add_argument('--corpus-batch-size', type=positive_int, default=64,
+                        help='Random walks parsed per streaming batch')
+
+    parser.add_argument('--corpus-prefetch-batches', type=non_negative_int,
+                        default=4,
+                        help='Number of parsed streaming batches to prefetch')
+
+    parser.add_argument('--progress-interval', type=positive_int,
+                        default=100000,
+                        help='Random walks between progress log updates')
+
     parser.add_argument('-o', '--outputdir', required=True,
                         help='Output dir for logs and checkpoints')
 
@@ -754,6 +918,14 @@ def main():
 
         # Number of parallel  workers
         'workers': args.workers,
+
+        # Queue size multiplier for the internal training workers
+        'queue_factor': args.queue_factor,
+
+        # Streaming corpus controls
+        'corpus_batch_size': args.corpus_batch_size,
+        'corpus_prefetch_batches': args.corpus_prefetch_batches,
+        'progress_interval': args.progress_interval,
 
         # Map each selected function to a numerical ID
         'id2func_path': os.path.join(args.inputdir, "id2func.json"),
