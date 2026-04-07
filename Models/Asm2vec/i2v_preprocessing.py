@@ -36,6 +36,7 @@
 
 import argparse
 import coloredlogs
+import hashlib
 import json
 import logging
 import multiprocessing
@@ -43,17 +44,71 @@ import networkx as nx
 import os
 import random
 import re
+import shutil
+import tempfile
 
 from collections import Counter
 from collections import defaultdict
 from tqdm import tqdm
 
 log = None
+SAVE_VOCABULARY = None
 # FIXED PARAM
-random.seed(11)
+RANDOM_SEED = 11
+random.seed(RANDOM_SEED)
 
 
 INST_SPLITTER = re.compile(r"[#,\{\}\+\-\*\\\[\]:\(\)\s]")
+
+
+def positive_int(value):
+    """Argparse helper for strictly positive integers."""
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(
+            "{} is invalid, expected an integer >= 1".format(value))
+    return ivalue
+
+
+def iter_json_paths(inputdir):
+    """Return JSON input files in a deterministic order."""
+    return [
+        os.path.join(inputdir, f_name)
+        for f_name in sorted(os.listdir(inputdir))
+        if f_name.endswith(".json")
+    ]
+
+
+def safe_log_warning(message):
+    """Log a warning even when the worker logger is not configured."""
+    if log is not None:
+        log.warning(message)
+    else:
+        logging.getLogger("i2v_preprocessing").warning(message)
+
+
+def get_deterministic_seed(identifier):
+    """Create a deterministic seed independent from worker scheduling."""
+    digest = hashlib.sha256(identifier.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big") ^ RANDOM_SEED
+
+
+def normalize_num_workers(num_workers, num_items=0):
+    """Clamp the worker count to a sensible range."""
+    workers = max(1, int(num_workers))
+    if num_items > 0:
+        workers = min(workers, num_items)
+    return workers
+
+
+def accumulate_offsets(counts):
+    """Compute prefix sums for deterministic function-id assignment."""
+    offsets = list()
+    current_offset = 0
+    for count in counts:
+        offsets.append(current_offset)
+        current_offset += count
+    return offsets
 
 
 def set_logger(debug, outputdir):
@@ -88,7 +143,7 @@ def set_logger(debug, outputdir):
                         logger=log)
 
 
-def generate_random_walks(G, num_rwalks, max_walk_len):
+def generate_random_walks(G, num_rwalks, max_walk_len, rng):
     """
     Generate random walks on the CFG in input.
 
@@ -104,12 +159,12 @@ def generate_random_walks(G, num_rwalks, max_walk_len):
 
     # Graph is empty
     if len(G.nodes) == 0:
-        log.warning("Graph doesn't contain any node")
+        safe_log_warning("Graph doesn't contain any node")
         return list_rwalks
 
     # Graph contains one node only:
     if len(G.nodes) == 1:
-        log.warning("Graph contains 1 node only")
+        safe_log_warning("Graph contains 1 node only")
         return [[list(G.nodes)[0]] for x in range(num_rwalks)]
 
     for _ in range(num_rwalks):
@@ -120,7 +175,7 @@ def generate_random_walks(G, num_rwalks, max_walk_len):
         starting_nodes = [n for n in G.nodes if G.in_degree(n) == 0]
         if len(starting_nodes) > 0:
             # Pick-up a random node among those in the list
-            current_node = random.sample(starting_nodes, k=1)[0]
+            current_node = rng.sample(starting_nodes, k=1)[0]
         else:
             # If could not find a node with in_degree == 0,
             # take the node at the lowest address
@@ -140,7 +195,7 @@ def generate_random_walks(G, num_rwalks, max_walk_len):
                 and (len(rwalk) < max_walk_len):
 
             # Pick up a random successor node
-            current_node = random.choice(list(successors))
+            current_node = rng.choice(list(successors))
 
             # Update the current random walk
             rwalk_set.add(current_node)
@@ -267,16 +322,16 @@ def select_tokens(counter_dict, min_frequency, vocabulary=None):
         # If the vocabulary is not defined (i.e., training dataset)
         new_counter_dict = {x: y for x,
                             y in counter_dict.items() if y >= min_frequency}
-        selected_tokens = new_counter_dict.keys()
-        dropped_tokens = counter_dict.keys() - selected_tokens
+        selected_tokens = set(new_counter_dict.keys())
+        dropped_tokens = set(counter_dict.keys()) - selected_tokens
 
     else:
         log.info("\tUsing existing tokens vocabulary")
         # If the vocabulary is defined (i.e., testing dataset)
-        selected_tokens = counter_dict.keys() & vocabulary
+        selected_tokens = set(counter_dict.keys()) & set(vocabulary)
         new_counter_dict = {x: counter_dict[x]
                             for x in (selected_tokens)}
-        dropped_tokens = counter_dict.keys() - selected_tokens
+        dropped_tokens = set(counter_dict.keys()) - selected_tokens
 
     log.info("\t{} dropped tokens".format(len(dropped_tokens)))
     log.info("\t{} selected tokens".format(len(selected_tokens)))
@@ -311,7 +366,7 @@ def save_vocabulary_to_file(selected_tokens, output_path):
         output_path: the path of the file in output
     """
     with open(output_path, "w") as f_out:
-        f_out.write("\n".join(list(selected_tokens)))
+        f_out.write("\n".join(sorted(selected_tokens)))
 
     log.info("[*] Vocabulary saved to: {}".format(output_path))
 
@@ -325,7 +380,7 @@ def save_counter_dict_to_file(counter_dict, output_path):
         output_path: the path of the JSON file
     """
     with open(output_path, "w") as f_out:
-        json.dump(counter_dict, f_out)
+        json.dump(counter_dict, f_out, sort_keys=True)
 
     log.info("[*] Tokens counter saved to: {}".format(output_path))
 
@@ -379,123 +434,219 @@ def save_rwalks_to_file_inner(asm2vec, max_tokens, functions_dict,
             f_out.write("{},{}\n".format(_id, ";".join(new_rand_walk)))
 
 
-def save_rwalks_to_file(queue_funcs_dict, config, vocabulary,
-                        outputdir, tot_iterations):
+def init_save_worker(vocabulary):
+    """Initialize save-stage worker state once per process."""
+    global SAVE_VOCABULARY
+    SAVE_VOCABULARY = vocabulary
+
+
+def save_rwalks_shard(task):
+    """Serialize one random-walk shard to temporary output files."""
+    task_idx, temp_path, csv_part_path, id2func_part_path, asm2vec, max_tokens, start_id = task
+    with open(temp_path) as f_in:
+        functions_dict = json.load(f_in)
+
+    id2func = dict()
+    func2id = dict()
+    with open(csv_part_path, "w") as f_out:
+        save_rwalks_to_file_inner(
+            asm2vec=asm2vec,
+            max_tokens=max_tokens,
+            functions_dict=functions_dict,
+            id2func=id2func,
+            func2id=func2id,
+            f_out=f_out,
+            vocabulary=SAVE_VOCABULARY,
+            max_id=start_id)
+
+    with open(id2func_part_path, "w") as f_out:
+        json.dump(id2func, f_out)
+
+    return task_idx, csv_part_path, id2func_part_path
+
+
+def save_rwalks_to_file(temp_result_paths, function_counts, config,
+                        vocabulary, outputdir, num_workers):
     """
     Wrapper function that save tokens to file
 
     Args
-        queue_funcs_dict: queue with results from workers
+        temp_result_paths: worker temporary files with random walks
+        function_counts: number of functions in each temporary shard
         config: configuration dictionary (model name, random walk length...)
         vocabulary: set of the vocabulary tokens (can be None)
         outputdir: output directory to save the results
-        tot_iterations: this is used to update the progress bar
+        num_workers: number of workers available for parallel execution
     """
     log.info("[*] Saving random walks to file")
-    id2func = dict()
-    func2id = dict()
 
     asm2vec = False
     if config['model'] == 'a2v':
         asm2vec = True
+    vocabulary = set(vocabulary)
 
     # Save random walks to file
     output_path = os.path.join(
         outputdir, "random_walks_{}.csv".format(config['model']))
-    f_out = open(output_path, "w")
-    f_out.write("func_id,random_walk\n")
+    id2func_output_path = os.path.join(outputdir, "id2func.json")
 
-    # Collect the fdict results
-    pbar = tqdm(total=tot_iterations)
-    while not queue_funcs_dict.empty():
-        f_dict = queue_funcs_dict.get()
+    if not temp_result_paths:
+        with open(output_path, "w") as f_out:
+            f_out.write("func_id,random_walk\n")
+        with open(id2func_output_path, "w") as f_out:
+            json.dump(dict(), f_out)
+        log.info("\trandom_walks saved to: {}".format(output_path))
+        log.info("\tid2func saved to: {}".format(id2func_output_path))
+        return
 
-        save_rwalks_to_file_inner(
-            asm2vec=asm2vec,
-            max_tokens=config['max_walk_tokens'],
-            functions_dict=f_dict,
-            id2func=id2func,
-            func2id=func2id,
-            f_out=f_out,
-            vocabulary=vocabulary,
-            max_id=len(id2func))
-        pbar.update(1)
-    pbar.close()
+    shard_output_dir = tempfile.mkdtemp(
+        prefix="i2v_save_parts_",
+        dir=outputdir)
+    try:
+        shard_offsets = accumulate_offsets(function_counts)
+        shard_tasks = [
+            (
+                task_idx,
+                temp_path,
+                os.path.join(
+                    shard_output_dir,
+                    "random_walks_part_{:08d}.csv".format(task_idx)),
+                os.path.join(
+                    shard_output_dir,
+                    "id2func_part_{:08d}.json".format(task_idx)),
+                asm2vec,
+                config['max_walk_tokens'],
+                shard_offsets[task_idx],
+            )
+            for task_idx, temp_path in enumerate(temp_result_paths)
+        ]
+        ordered_csv_parts = dict()
+        ordered_id2func_parts = dict()
+        save_workers = normalize_num_workers(num_workers, len(shard_tasks))
 
-    f_out.close()
-    log.info("\trandom_walks saved to: {}".format(output_path))
+        if save_workers == 1 or len(shard_tasks) == 1:
+            init_save_worker(vocabulary)
+            shard_iter = map(save_rwalks_shard, shard_tasks)
+        else:
+            pool = multiprocessing.Pool(
+                processes=save_workers,
+                maxtasksperchild=50,
+                initializer=init_save_worker,
+                initargs=(vocabulary,))
+            shard_iter = pool.imap_unordered(save_rwalks_shard, shard_tasks)
 
-    # Save the id2func mapping to file
-    output_path = os.path.join(outputdir, "id2func.json")
-    with open(output_path, "w") as f_out:
-        json.dump(id2func, f_out)
-    log.info("\tid2func saved to: {}".format(output_path))
+        try:
+            for task_idx, csv_part_path, id2func_part_path in tqdm(
+                    shard_iter,
+                    total=len(shard_tasks),
+                    desc="Writing random walks",
+                    dynamic_ncols=True):
+                ordered_csv_parts[task_idx] = csv_part_path
+                ordered_id2func_parts[task_idx] = id2func_part_path
+        finally:
+            if save_workers > 1 and len(shard_tasks) > 1:
+                pool.close()
+                pool.join()
+
+        id2func = dict()
+        with open(output_path, "w") as f_out:
+            f_out.write("func_id,random_walk\n")
+            for task_idx in range(len(shard_tasks)):
+                with open(ordered_csv_parts[task_idx]) as f_in:
+                    shutil.copyfileobj(f_in, f_out)
+
+                with open(ordered_id2func_parts[task_idx]) as f_in:
+                    id2func.update(json.load(f_in))
+
+        log.info("\trandom_walks saved to: {}".format(output_path))
+
+        with open(id2func_output_path, "w") as f_out:
+            json.dump(id2func, f_out)
+        log.info("\tid2func saved to: {}".format(id2func_output_path))
+    finally:
+        shutil.rmtree(shard_output_dir, ignore_errors=True)
 
 
-def worker_func(queue_counter_dict, queue_funcs_dict, j_path, config):
+def worker_func(task):
     """
     Random walks and tokens extraction for each function.
 
     Args:
-        queue_counter_dict: multiprocess queue to collect the results
-        queue_funcs_dict: multiprocess queue to collect the results
-        j_path: path of the mldisasm JSON file in input
-        config: configuration dictionary
+        task: tuple with task index, input JSON path, worker output path,
+          and preprocessing configuration
 
     Return:
-        functions_dict: a dict that maps functions to random walks.
+        tuple with task index, token counter, and output file path
     """
+    task_idx, j_path, worker_output_path, config = task
     functions_dict = defaultdict(list)
 
-    with open(j_path) as f_in:
-        jj = json.load(f_in)
+    try:
+        with open(j_path) as f_in:
+            jj = json.load(f_in)
 
-    idb_path = list(jj.keys())[0]
-    print("[D] Processing: {}".format(idb_path))
-    j_data = jj[idb_path]
-    del j_data['arch']
-    # num_functions = len(j_data.keys())
+        idb_path = list(jj.keys())[0]
+        print("[D] Processing: {}".format(idb_path))
+        j_data = jj[idb_path]
+        j_data.pop('arch', None)
+        # num_functions = len(j_data.keys())
 
-    # Iterate over each function
-    for cnt, fva in enumerate(j_data):
-        # print("[D] Processing: {}:{} ({}/{})".format(
-        #     idb_path, fva, cnt + 1, num_functions))
+        # Iterate over each function
+        for cnt, fva in enumerate(j_data):
+            # print("[D] Processing: {}:{} ({}/{})".format(
+            #     idb_path, fva, cnt + 1, num_functions))
 
-        fva_data = j_data[fva]
+            fva_data = j_data[fva]
 
-        # Generate a nx.Digraph for the function
-        nodes = fva_data['nodes']
-        edges = fva_data['edges']
-        G = generate_CFG(nodes, edges)
+            # Generate a nx.Digraph for the function
+            nodes = fva_data['nodes']
+            edges = fva_data['edges']
+            G = generate_CFG(nodes, edges)
 
-        random_walks = list()
+            random_walks = list()
 
-        # In the first visit use the original instructions order
-        random_walks.append(list(fva_data['nodes']))
-        num_rwalks = config['num_rwalks'] - 1
+            # In the first visit use the original instructions order
+            random_walks.append(list(fva_data['nodes']))
+            num_rwalks = config['num_rwalks'] - 1
 
-        # Add the other visits in random order
-        if num_rwalks > 0:
-            random_walks.extend(generate_random_walks(
-                G, num_rwalks=num_rwalks,
-                max_walk_len=config['max_walk_len']))
+            # Keep the additional walks reproducible regardless of the worker
+            # scheduling order used by multiprocessing.
+            func_rng = random.Random(
+                get_deterministic_seed("{}:{}".format(idb_path, fva)))
 
-        # Convert a visit into a list of instructions
-        for random_walk in random_walks:
-            instructions_list = generate_instruction_sequences(
-                random_walk,
-                fva_data['basic_blocks'],
-                config['max_walk_tokens'])
+            # Add the other visits in random order
+            if num_rwalks > 0:
+                random_walks.extend(generate_random_walks(
+                    G,
+                    num_rwalks=num_rwalks,
+                    max_walk_len=config['max_walk_len'],
+                    rng=func_rng))
 
-            # functions_dict contains a list of random walks for each function
-            #   Each random_walk is a list of instructions
-            #   Each instruction is a list of mnemonic and operands
-            functions_dict["{}:{}".format(idb_path, fva)].append(
-                instructions_list)
+            # Convert a visit into a list of instructions
+            for random_walk in random_walks:
+                instructions_list = generate_instruction_sequences(
+                    random_walk,
+                    fva_data['basic_blocks'],
+                    config['max_walk_tokens'])
 
-    # Save the results in the queue
-    queue_counter_dict.put(get_tokens_count(functions_dict))
-    queue_funcs_dict.put(functions_dict)
+                # functions_dict contains a list of random walks for each function
+                #   Each random_walk is a list of instructions
+                #   Each instruction is a list of mnemonic and operands
+                functions_dict["{}:{}".format(idb_path, fva)].append(
+                    instructions_list)
+
+        with open(worker_output_path, "w") as f_out:
+            json.dump(functions_dict, f_out)
+
+        return (
+            task_idx,
+            get_tokens_count(functions_dict),
+            worker_output_path,
+            len(functions_dict),
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "[!] Exception while processing {}: {}".format(j_path, exc)) from exc
 
 
 def preprocess_inputs(config, inputdir, outputdir,
@@ -511,75 +662,90 @@ def preprocess_inputs(config, inputdir, outputdir,
         workers: number of workers for parallel execution
     """
     c_dict_glob = Counter()
+    json_paths = iter_json_paths(inputdir)
+    worker_output_dir = tempfile.mkdtemp(
+        prefix="i2v_preprocessing_parts_",
+        dir=outputdir)
+    ordered_result_paths = list()
+    ordered_function_counts = list()
 
-    pool_results = list()
-    log.info("[*] Creating a new Pool (num_workers: {})".format(num_workers))
-    pool = multiprocessing.Pool(processes=num_workers, maxtasksperchild=50)
+    try:
+        if not json_paths:
+            log.warning("[!] No JSON files found in %s", inputdir)
+        else:
+            workers = normalize_num_workers(num_workers, len(json_paths))
+            tasks = [
+                (
+                    task_idx,
+                    j_path,
+                    os.path.join(
+                        worker_output_dir,
+                        "random_walks_part_{:08d}.json".format(task_idx)),
+                    config,
+                )
+                for task_idx, j_path in enumerate(json_paths)
+            ]
+            result_paths_by_idx = dict()
+            function_counts_by_idx = dict()
 
-    # Creating two queues: one to for the tokens counter,
-    #   the other for the functions random walks.
-    m = multiprocessing.Manager()
-    queue_counter_dict = m.Queue()
-    queue_funcs_dict = m.Queue()
+            log.info("[*] Creating a new Pool (num_workers: {})".format(workers))
+            with multiprocessing.Pool(
+                    processes=workers,
+                    maxtasksperchild=50) as pool:
+                for task_idx, counter_dict, worker_output_path, function_count in tqdm(
+                        pool.imap_unordered(worker_func, tasks),
+                        total=len(tasks),
+                        desc="Processing JSON files",
+                        dynamic_ncols=True):
+                    c_dict_glob += counter_dict
+                    result_paths_by_idx[task_idx] = worker_output_path
+                    function_counts_by_idx[task_idx] = function_count
 
-    # Iterate over each JSON file (each JSON corresponds to an IDB)
-    for f_name in tqdm(os.listdir(inputdir)):
-        if not f_name.endswith(".json"):
-            continue
+            ordered_result_paths = [
+                result_paths_by_idx[task_idx]
+                for task_idx in range(len(tasks))
+            ]
+            ordered_function_counts = [
+                function_counts_by_idx[task_idx]
+                for task_idx in range(len(tasks))
+            ]
+            log.info("[*] All processes finished")
 
-        j_path = os.path.join(inputdir, f_name)
-        res = pool.apply_async(worker_func, args=(
-            queue_counter_dict, queue_funcs_dict, j_path, config,))
-        pool_results.append(res)
+        # Evaluation and test data use the same tokens as in the vocabulary
+        selected_tokens = vocabulary_set
+        dropped_tokens = None
+        new_counter_dict = None
 
-    log.info("[*] Waiting for processes to finish")
+        if not vocabulary_set:
+            # Select which tokens to filter-out based on their frequency
+            selected_tokens, dropped_tokens, new_counter_dict = select_tokens(
+                counter_dict=c_dict_glob,
+                min_frequency=config['min_frequency'],
+                vocabulary=vocabulary_set)
 
-    # Close the pool
-    pool.close()
-    pool.join()
+        # Save random walks to file
+        save_rwalks_to_file(
+            ordered_result_paths,
+            ordered_function_counts,
+            config,
+            selected_tokens,
+            outputdir,
+            num_workers)
 
-    # Wait for all the async tasks to finish
-    for res in pool_results:
-        res.get()
-    log.info("[*] All processes finished")
+        if not vocabulary_set:
+            output_file = "vocabulary.csv"
+            output_path = os.path.join(outputdir, output_file)
+            save_vocabulary_to_file(selected_tokens, output_path)
 
-    # Collect the results from queue_counter_dict
-    log.info("[*] Collecting results from counter_dict")
+            output_file = "vocabulary_dropped.csv"
+            output_path = os.path.join(outputdir, output_file)
+            save_vocabulary_to_file(dropped_tokens, output_path)
 
-    pbar = tqdm(total=len(pool_results))
-    while not queue_counter_dict.empty():
-        c_dict_glob += queue_counter_dict.get()
-        pbar.update(1)
-    pbar.close()
-
-    # Evaluation and test data use the same tokens as in the vocabulary
-    selected_tokens = vocabulary_set
-    dropped_tokens = None
-    new_counter_dict = None
-
-    if not vocabulary_set:
-        # Select which tokens to filter-out based on their frequency
-        selected_tokens, dropped_tokens, new_counter_dict = select_tokens(
-            counter_dict=c_dict_glob,
-            min_frequency=config['min_frequency'],
-            vocabulary=vocabulary_set)
-
-    # Save random walks to file
-    save_rwalks_to_file(queue_funcs_dict, config,
-                        selected_tokens, outputdir, len(pool_results))
-
-    if not vocabulary_set:
-        output_file = "vocabulary.csv"
-        output_path = os.path.join(outputdir, output_file)
-        save_vocabulary_to_file(selected_tokens, output_path)
-
-        output_file = "vocabulary_dropped.csv"
-        output_path = os.path.join(outputdir, output_file)
-        save_vocabulary_to_file(dropped_tokens, output_path)
-
-        output_file = "counter_dict.json"
-        output_path = os.path.join(outputdir, output_file)
-        save_counter_dict_to_file(new_counter_dict, output_path)
+            output_file = "counter_dict.json"
+            output_path = os.path.join(outputdir, output_file)
+            save_counter_dict_to_file(new_counter_dict, output_path)
+    finally:
+        shutil.rmtree(worker_output_dir, ignore_errors=True)
 
 
 def main():
@@ -602,22 +768,22 @@ def main():
                         action='store_const', const='a2v',
                         help='Use it for the asm2vec model version')
 
-    parser.add_argument('--num_rwalks', type=int, default=10,
+    parser.add_argument('--num_rwalks', type=positive_int, default=10,
                         help="Number of random walks")
 
-    parser.add_argument('--max_walk_len', type=int, default=500,
+    parser.add_argument('--max_walk_len', type=positive_int, default=500,
                         help="Max number of BBs in each random_walk")
 
-    parser.add_argument('--max_walk_tokens', type=int, default=50000,
+    parser.add_argument('--max_walk_tokens', type=positive_int, default=50000,
                         help="Max number of tokens for each random_walk")
 
-    parser.add_argument('--min_frequency', type=int, default=3,
+    parser.add_argument('--min_frequency', type=positive_int, default=3,
                         help="Min tokens counter for selection")
 
     parser.add_argument('-v', '--vocabulary',
                         help='Path of an existing vocabulary')
 
-    parser.add_argument('-w', '--workers', type=int, default=2,
+    parser.add_argument('-w', '--workers', type=positive_int, default=2,
                         help='Number of workers to process the input')
 
     parser.add_argument('-o', '--outputdir', required=True,
@@ -637,10 +803,10 @@ def main():
 
     config = {
         'model': args.model,
-        'num_rwalks': int(args.num_rwalks),
-        'max_walk_len': int(args.max_walk_len),
-        'max_walk_tokens': int(args.max_walk_tokens),
-        'min_frequency': int(args.min_frequency),
+        'num_rwalks': args.num_rwalks,
+        'max_walk_len': args.max_walk_len,
+        'max_walk_tokens': args.max_walk_tokens,
+        'min_frequency': args.min_frequency,
     }
 
     vocabulary_set = None

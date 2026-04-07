@@ -56,6 +56,15 @@ log = None
 doc_keys = None
 
 
+def positive_int(value):
+    """Argparse helper for strictly positive integers."""
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(
+            "{} is invalid, expected an integer >= 1".format(value))
+    return ivalue
+
+
 def set_logger(debug, outputdir):
     """
     Set logger level, syntax, and logfile.
@@ -697,10 +706,10 @@ def main():
     group0.add_argument('--inference', action='store_true',
                         help='Run model inference')
 
-    parser.add_argument('-e', '--epochs', type=int, default=1,
+    parser.add_argument('-e', '--epochs', type=positive_int, default=1,
                         help='Number of training epochs')
 
-    parser.add_argument('-w', '--workers', type=int, default=2,
+    parser.add_argument('-w', '--workers', type=positive_int, default=2,
                         help='Number of workers to process the input')
 
     parser.add_argument('-o', '--outputdir', required=True,
