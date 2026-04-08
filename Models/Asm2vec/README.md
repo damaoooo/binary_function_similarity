@@ -28,6 +28,7 @@ These are the concrete steps to run the analysis within the provided Docker cont
 
 1. Build the docker image: 
 ```bash
+cd Models/Asm2vec
 docker build -t asm2vec .
 ```
 
@@ -35,7 +36,7 @@ If you modify [`i2v.py`](i2v.py), [`i2v_preprocessing.py`](i2v_preprocessing.py)
 
 2. Run the [i2v_preprocessing.py](i2v_preprocessing.py) script within the docker container:
 ```bash
-docker run --rm -v <path_to_the_acfg_disasm_dir>:/input -v <path_to_the_output_dir>:/output -it asm2vec /code/i2v_preprocessing.py -d [--workers 4] [-a2v, -d2v] -i /input -o /output/
+docker run --rm -v "$(pwd)/<path_to_the_acfg_disasm_dir>":/input -v "$(pwd)":/output -it asm2vec /code/i2v_preprocessing.py -d [--workers 4] [-a2v, -d2v] -i /input -o /output/
 ```
 
 You can see all the command line options using:
@@ -45,19 +46,19 @@ docker run --rm -it asm2vec /code/i2v_preprocessing.py --help
 
 Example (1): run the [i2v_preprocessing.py](i2v_preprocessing.py) script for the training part of Dataset-1 with `-a2v`:
 ```bash
-docker run --rm -v $(pwd)/../../DBs/Dataset-1/features/training/acfg_disasm_Dataset-1_training:/input -v $(pwd):/output -it asm2vec /code/i2v_preprocessing.py -d -w4 -a2v -i /input -o /output/a2v_preprocessing_Dataset-1-training
+docker run --rm -v "$(pwd)/../../DBs/Dataset-1/features/training/acfg_disasm_Dataset-1_training":/input -v "$(pwd)":/output -it asm2vec /code/i2v_preprocessing.py -d -w4 -a2v -i /input -o /output/a2v_preprocessing_Dataset-1-training
 ```
 
 Example (2): run the [i2v_preprocessing.py](i2v_preprocessing.py) script for the training part of Dataset-1 with `-d2v`:
 ```bash
-docker run --rm -v $(pwd)/../../DBs/Dataset-1/features/training/acfg_disasm_Dataset-1_training:/input -v $(pwd):/output -it asm2vec /code/i2v_preprocessing.py -d -w4 -d2v -i /input -o /output/d2v_preprocessing_Dataset-1-training
+docker run --rm -v "$(pwd)/../../DBs/Dataset-1/features/training/acfg_disasm_Dataset-1_training":/input -v "$(pwd)":/output -it asm2vec /code/i2v_preprocessing.py -d -w4 -d2v -i /input -o /output/d2v_preprocessing_Dataset-1-training
 ```
 
 When processing validation or testing data, use the `-v` (`--vocabulary`) option to give in input the training vocabulary.
 
 Example (3): run the [i2v_preprocessing.py](i2v_preprocessing.py) script for the testing part of Dataset-1 with `-a2v`:
 ```bash
-docker run --rm -v $(pwd)/../../DBs/Dataset-1/features/testing/acfg_disasm_Dataset-1_testing:/input -v $(pwd)/a2v_preprocessing_Dataset-1-training:/training_data -v $(pwd):/output -it asm2vec /code/i2v_preprocessing.py -d -w4 -a2v -i /input -v /training_data/vocabulary.csv -o /output/a2v_preprocessing_Dataset-1-testing
+docker run --rm -v "$(pwd)/../../DBs/Dataset-1/features/testing/acfg_disasm_Dataset-1_testing":/input -v "$(pwd)/a2v_preprocessing_Dataset-1-training":/training_data -v "$(pwd)":/output -it asm2vec /code/i2v_preprocessing.py -d -w4 -a2v -i /input -v /training_data/vocabulary.csv -o /output/a2v_preprocessing_Dataset-1-testing
 ```
 
 ## Part 2
@@ -92,7 +93,7 @@ The similarity between two functions is computed using the cosine similarity bet
 ### Instructions with Docker
 1. Run the neural network model
 ```bash
-docker run --rm -v <path_to_i2v_preprocessing_output_folder>:/input -v $(pwd):/output -it asm2vec /code/i2v.py -d [--asm2vec, --pvdm, --pvdbow] [--train, --inference, --log] -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -o /output/output_folder
+docker run --rm -v "$(pwd)/<path_to_i2v_preprocessing_output_folder>":/input -v "$(pwd)":/output -it asm2vec /code/i2v.py -d [--asm2vec, --pvdm, --pvdbow] [--train, --inference, --log] -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -o /output/output_folder
 ```
 
 You can see all the command line options using:
@@ -102,12 +103,12 @@ docker run --rm -it asm2vec /code/i2v.py --help
 
 Example (1): train the Asm2vec model on Dataset-1.
 ```bash
-docker run --rm -v $(pwd)/a2v_preprocessing_Dataset-1-training:/input -v $(pwd):/output -it asm2vec /code/i2v.py -d --asm2vec --train -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -o /output/asm2vec_train_Dataset-1-training
+docker run --rm -v "$(pwd)/a2v_preprocessing_Dataset-1-training":/input -v "$(pwd)":/output -it asm2vec /code/i2v.py -d --asm2vec --train -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -o /output/asm2vec_train_Dataset-1-training
 ```
 
 Example (2): run the Asm2vec model in inference mode on the testing data of Dataset-1.
 ```bash
-docker run --rm -v $(pwd)/a2v_preprocessing_Dataset-1-testing:/input -v $(pwd)/asm2vec_train_Dataset-1-training:/checkpoint -v $(pwd):/output -it asm2vec /code/i2v.py -d --asm2vec --inference -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -c /checkpoint -o /output/asm2vec_inference_Dataset-1-testing
+docker run --rm -v "$(pwd)/a2v_preprocessing_Dataset-1-testing":/input -v "$(pwd)/asm2vec_train_Dataset-1-training":/checkpoint -v "$(pwd)":/output -it asm2vec /code/i2v.py -d --asm2vec --inference -e1 -w16 --queue-factor 12 --corpus-batch-size 128 --corpus-prefetch-batches 8 --progress-interval 50000 --inputdir /input/ -c /checkpoint -o /output/asm2vec_inference_Dataset-1-testing
 ```
 
 For large datasets such as Dataset-1, the command above is a good starting point on a 32-thread CPU. In our tests it was more stable than simply increasing `--workers` to 32. If the host starts to look underutilized, try `--workers 24`; if the input pipeline becomes unstable, fall back to `--workers 12`.
@@ -115,6 +116,15 @@ For large datasets such as Dataset-1, the command above is a good starting point
 When no validation CSVs are configured, [`i2v.py`](i2v.py) now logs `Validation skipped` and exits cleanly after writing the checkpoint or embeddings.
 
 Use a fresh output directory for each run, otherwise `i2v.log` will append to the previous log and make the training timeline harder to read.
+
+If you see `FileNotFoundError: /input/id2func.json`, the `/input` mount is pointing to the wrong directory or to an incomplete preprocessing output. Check that the mounted folder contains at least `id2func.json` and `random_walks_a2v.csv` before launching [`i2v.py`](i2v.py).
+
+All Docker commands above assume you are already inside the `Models/Asm2vec` directory. If you launch them from another directory, `$(pwd)` will expand to the wrong host path and Docker may mount an empty or unrelated folder at `/input`.
+
+If you already have an `embeddings.csv` file and only need the pairwise similarity CSVs for evaluation, run [`embeddings_to_pairs.py`](embeddings_to_pairs.py):
+```bash
+python3 embeddings_to_pairs.py -e asm2vec_inference_Dataset-1-testing/embeddings.csv -p ../../DBs/Dataset-1/pairs/testing -o asm2vec_inference_Dataset-1-testing
+```
 
 ## How to use Asm2vec and Doc2vec models on a new dataset of functions
 
@@ -133,7 +143,7 @@ The following are the main steps that are needed to run the Asm2vec and Doc2vec 
 2. Extract the features using the ACFG disasm IDA plugin following the instructions in the [README](../../IDA_scripts/#ida-acfg-disasm). `idb_path_1` and `idb_path_2` for the selected functions must be valid paths to the IDBs file to run the IDA plugin correctly.
 3. Run the [i2v_preprocessing.py](i2v_preprocessing.py) script following the instructions in [Part 1](#part-1).
 4. Run the [i2v.py](i2v.py) script in inference mode (`--inference`) following the instructions in [Part 2](#part-2).
-5. Compute the function similarity using the *cosine similarity* between the corresponding embeddings.
+5. Compute the function similarity using the *cosine similarity* between the corresponding embeddings, or use [`embeddings_to_pairs.py`](embeddings_to_pairs.py) to convert `embeddings.csv` and the testing pairs into `*_sim.csv` files directly.
 
 ## Additional notes
 
