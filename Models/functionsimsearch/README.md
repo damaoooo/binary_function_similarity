@@ -5,17 +5,33 @@ This tool is based on this project by Thomas Dullien: https://github.com/googlep
 
 
 ## Part 1
-Before running the IDA plugin, follow the list of requirements from the IDA_scripts [README](../../../IDA_scripts/README.md#requirements).
+Before running the IDA plugin, make sure `click` is available in the Python
+environment that launches `cli_fss.py`.
 
-- **Input**: the JSON file with the selected functions (`-j`), the output directory (`-o`), and (`-c`) to use Capstone to disassemble.
+If you use `-c/--use-capstone`, the `capstone` Python module must also be
+available inside IDA's own Python environment. Without it, the command fails
+explicitly instead of silently generating empty results.
+
+- **Input**: the JSON file with the selected functions (`-j`), the output
+  directory (`-o`), and (`-c`) to use Capstone to disassemble.
 - **Output**: one JSON file per IDB
+
+Useful options:
+- `--ida-path`: path to `idat`/`idat64`, or the IDA installation directory
+- `-n/--jobs`: number of IDA processes to run in parallel (`0` means auto)
+- `--log-dir`: where per-IDB IDA logs are written (default:
+  `<output-dir>/logs`)
 
 **Note**: the path of the IDB files in the JSON in input **must be relative** to the `binary_function_similarity` directory. The Python3 script converts the relative path into a full path to correctly load the IDB in IDA Pro.
 
 Example: run the plugins over the functions selected for the Dataset-Vulnerability test (requires the IDBs in the `IDBs/Dataset-Vulnerability` directory)
 ```bash
 cd IDA_fss
-python3 cli_fss.py -j ../../../DBs/Dataset-Vulnerability/features/selected_Dataset-Vulnerability.json -o fss_Dataset-Vulnerability -c
+python3 cli_fss.py \
+  --ida-path /home/damaoooo/ida-pro-9.3 \
+  -j ../../../DBs/Dataset-Vulnerability/features/selected_Dataset-Vulnerability.json \
+  -o fss_Dataset-Vulnerability \
+  -n 16
 ```
 
 Run unit tests:
@@ -80,4 +96,3 @@ docker run --rm -v $(pwd)/../../DBs/Dataset-2/features/fss_Dataset-2:/input -v $
 [FunctionSimSearch](https://github.com/googleprojectzero/functionsimsearch) is released under Apache License 2.0.
 
 [IDA_fss.py](IDA_fss/IDA_fss.py) includes part of the code from https://github.com/williballenthin/python-idb/ and https://github.com/googleprojectzero/functionsimsearch which are licensed under Apache License 2.0.
-

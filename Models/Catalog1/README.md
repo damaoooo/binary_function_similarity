@@ -16,11 +16,18 @@ After compilation, `libcatalog1.so` will appear under `catalog1/bin`.
 - **input**: the JSON file with the selected functions (`-j`) and the name of the CSV file in output (`-o`).
 - **output**: one CSV file per Catalog1 signature size (default: `[16, 32, 64, 128]`)
 
+The CLI now opens each IDB only once and computes all requested signature sizes in the same IDA run. Multiple IDBs can be processed in parallel with `--jobs`.
+
 **Note**: the path of the IDB files in the JSON in input **must be relative** to the `binary_function_similarity` directory. The Python3 script converts the relative path into a full path to correctly load the IDB in IDA Pro.
 
 Example: run the plugins over the functions selected for the Dataset-Vulnerability test (requires the IDBs in the `IDBs/Dataset-Vulnerability` directory)
 ```bash
 python3 cli_catalog1.py -j ../../DBs/Dataset-Vulnerability/features/selected_Dataset-Vulnerability.json -o Dataset-Vulnerability_catalog1.csv
+```
+
+Use more workers to process multiple IDBs in parallel:
+```bash
+python3 cli_catalog1.py -j ../../DBs/Dataset-Vulnerability/features/selected_Dataset-Vulnerability.json -o Dataset-Vulnerability_catalog1.csv --jobs 32
 ```
 
 Run unit tests:
@@ -49,6 +56,21 @@ b = [15508139, 42437122, 83784247, 138119612, 167793573, 29886129, 35551260, 121
 print(jaccard_similarity(a, b)) # 0.06666666666666667
 print(jaccard_similarity(a, a)) # 1.0
 ```
+
+If you already have the repository pairs under `DBs/.../pairs`, use [`catalog1_to_pairs.py`](catalog1_to_pairs.py) to convert one Catalog1 feature CSV plus that pairs directory into `*_sim.csv` files:
+```bash
+# Dataset-1, signature size 16
+python3 catalog1_to_pairs.py -c Dataset-1_catalog1_16.csv -p ../../DBs/Dataset-1/pairs/testing -o ./catalog1_16_sim_Dataset-1
+
+# Dataset-2, signature size 64
+python3 catalog1_to_pairs.py -c Dataset-2_catalog1_64.csv -p ../../DBs/Dataset-2/pairs -o ./catalog1_64_sim_Dataset-2
+```
+
+This writes one scored CSV per input pairs file, for example:
+* `pos_testing_*.csv` -> `pos_testing_*_sim.csv`
+* `neg_testing_*.csv` -> `neg_testing_*_sim.csv`
+* `pos_rank_testing_*.csv` -> `pos_rank_testing_*_sim.csv`
+* `neg_rank_testing_*.csv` -> `neg_rank_testing_*_sim.csv`
 
 **Note:** if the function has less than 4 bytes, `min_function_size_error` is inserted in the `catalog_hash_list` column.
 

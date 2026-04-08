@@ -1,9 +1,13 @@
 # Binding the C library to python:
 import ctypes
+
 from ctypes import cdll
+from os.path import abspath
+from os.path import dirname
+from os.path import join
 
 CATALOG1_LIB = 'libcatalog1.so'
-CATALOG1_LIB_PATH = "catalog1/bin/libcatalog1.so"
+CATALOG1_LIB_PATH = join(dirname(abspath(__file__)), 'bin', CATALOG1_LIB)
 
 
 class Catalog1Sign:

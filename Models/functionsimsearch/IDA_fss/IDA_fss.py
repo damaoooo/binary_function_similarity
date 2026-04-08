@@ -34,24 +34,47 @@
 #                                                                            #
 ##############################################################################
 
-import idaapi
+import ida_auto
+import ida_bytes
+import ida_funcs
+import ida_gdl
+import ida_ida
+import ida_loader
 import idautils
 import idc
+import ida_pro
+import ida_ua
 import json
 import ntpath
 import os
 import traceback
 
-from capstone import *
+try:
+    from capstone import (
+        CS_ARCH_ARM,
+        CS_ARCH_ARM64,
+        CS_ARCH_MIPS,
+        CS_ARCH_X86,
+        CS_MODE_32,
+        CS_MODE_64,
+        CS_MODE_ARM,
+        CS_MODE_BIG_ENDIAN,
+        CS_MODE_MIPS32,
+        CS_MODE_MIPS64,
+        Cs,
+    )
+    HAVE_CAPSTONE = True
+except ImportError:
+    HAVE_CAPSTONE = False
 
 
 def get_bitness():
     """Return 32/64 according to the binary bitness."""
-    info = idaapi.get_inf_structure()
-    if info.is_64bit():
+    if ida_ida.inf_is_64bit():
         return 64
-    elif info.is_32bit():
+    elif ida_ida.inf_is_32bit_or_higher():
         return 32
+    raise RuntimeError("Unsupported binary bitness")
 
 
 def initialize_capstone():
@@ -62,7 +85,12 @@ def initialize_capstone():
     https://github.com/williballenthin/python-idb/blob/
     2de7df8356ee2d2a96a795343e59848c1b4cb45b/idb/idapython.py#L874
     """
-    procname = idaapi.get_inf_structure().procName.lower()
+    if not HAVE_CAPSTONE:
+        raise RuntimeError(
+            "Capstone support requested but the 'capstone' Python module is "
+            "not installed in IDA's Python environment")
+
+    procname = ida_ida.inf_get_procname().lower()
     bitness = get_bitness()
     md = None
     prefix = "UNK_"
@@ -102,7 +130,7 @@ def initialize_capstone():
 
 def get_call_mnemonics():
     """Return different call instructions based on the arch."""
-    procname = idaapi.get_inf_structure().procName.lower()
+    procname = ida_ida.inf_get_procname().lower()
     print('[D] procName = {}'.format(procname))
 
     # Default choice
@@ -137,7 +165,7 @@ def capstone_disassembly(md, ea, size, prefix):
         bb_inss = list()
 
         # Get the binary data corresponding to the instruction.
-        binary_data = idc.get_bytes(ea, size)
+        binary_data = ida_bytes.get_bytes(ea, size)
         if binary_data is None:
             return bb_inss
 
@@ -246,7 +274,11 @@ def get_flowgraph_from(address, use_capstone):
     if use_capstone:
         md, prefix = initialize_capstone()
 
-    ida_flowgraph = idaapi.FlowChart(idaapi.get_func(address))
+    func = ida_funcs.get_func(address)
+    if func is None:
+        raise RuntimeError("Unable to find function at 0x{:x}".format(address))
+
+    ida_flowgraph = ida_gdl.FlowChart(func)
     nodes_set, edges_set = set(), set()
     instructions_dict = dict()
 
@@ -268,7 +300,7 @@ def get_flowgraph_from(address, use_capstone):
             for ii in idautils.Heads(block.start_ea, block.end_ea):
                 instructions.append((
                     ii,
-                    idc.GetMnem(ii),
+                    ida_ua.print_insn_mnem(ii),
                     # FIXME: only two operands?
                     # It's ok for x86/64 but it will not work on other archs.
                     (idc.print_operand(ii, 0).replace("+var_", "-0x"),
@@ -303,12 +335,12 @@ def run_fss(idb_path, fva_list, output_dir, use_capstone):
     """Extract the flowgraph for each function. Save output to JSON."""
     print("[D] Processing: %s" % idb_path)
     j_out = dict()
+    failures = 0
 
     # Create the output directory if it does not exist
-    if not os.path.isdir(output_dir):
-        os.mkdir(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
-    out_json_name = ntpath.basename(idb_path.replace(".i64", ""))
+    out_json_name = os.path.splitext(ntpath.basename(idb_path))[0]
     out_json_name += "_Capstone_{}_fss.json".format(use_capstone)
     out_json_path = os.path.join(output_dir, out_json_name)
 
@@ -327,39 +359,54 @@ def run_fss(idb_path, fva_list, output_dir, use_capstone):
         except Exception:
             print("[!] Exception: skipping function fva: %d" % fva)
             print('tb: {}'.format(traceback.format_exc()))
+            failures += 1
 
     with open(out_json_path, "w") as f_out:
         json.dump({idb_path: j_out}, f_out)
 
+    return failures
+
 
 if __name__ == '__main__':
-    if not idaapi.get_plugin_options("fss"):
+    plugin_options_raw = ida_loader.get_plugin_options("fss")
+    if not plugin_options_raw:
         print("[!] -Ofss option is missing")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
-    plugin_options = idaapi.get_plugin_options("fss").split(":")
+    plugin_options = plugin_options_raw.split(":")
     if len(plugin_options) != 4:
         print("[!] -Ofss:INPUT_JSON:IDB_PATH:OUTPUT_DIR:USE_CAPSTONE")
-        idc.Exit(1)
+        ida_pro.qexit(1)
 
     input_json = plugin_options[0]
     idb_path = plugin_options[1]
     output_dir = plugin_options[2]
     use_capstone_str = plugin_options[3]
 
-    use_capstone = False
-    if use_capstone_str == 'True':
-        use_capstone = True
+    use_capstone = use_capstone_str.lower() in {'1', 'true', 'yes'}
+    if use_capstone and not HAVE_CAPSTONE:
+        print(
+            "[!] Capstone support requested but the 'capstone' Python module "
+            "is not installed in IDA's Python environment")
+        ida_pro.qexit(1)
 
     with open(input_json) as f_in:
         selected_functions = json.load(f_in)
 
     if idb_path not in selected_functions:
         print("[!] Error! IDB path (%s) not in %s" % (idb_path, input_json))
-        idc.Exit(1)
+        ida_pro.qexit(1)
+
+    if not ida_auto.auto_wait():
+        print("[!] Auto-analysis did not complete successfully")
+        ida_pro.qexit(1)
 
     fva_list = selected_functions[idb_path]
     print("[D] Found %d addresses" % len(fva_list))
 
-    run_fss(idb_path, fva_list, output_dir, use_capstone)
-    idc.Exit(0)
+    failures = run_fss(idb_path, fva_list, output_dir, use_capstone)
+    if failures:
+        print("[!] Failed to process {} function(s)".format(failures))
+        ida_pro.qexit(1)
+
+    ida_pro.qexit(0)
