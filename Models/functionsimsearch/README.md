@@ -149,14 +149,51 @@ To compute recall@K or other pairwise metrics, merge the raw FSS CSVs from Part 
 - Dataset-2: `DBs/Dataset-2/pairs`
 - Dataset-Vulnerability: `DBs/Dataset-Vulnerability/pairs`
 
-The repository already includes a notebook for this conversion:
-- [`Results/notebooks/Convert FunctionSimSearch results.ipynb`](../../Results/notebooks/Convert%20FunctionSimSearch%20results.ipynb)
+The repository now includes a CLI replacement for the notebook:
+- [`convert_fss_results.py`](convert_fss_results.py)
 
-That notebook:
-- loads one raw FSS CSV
-- joins it with the existing pairs CSVs
-- computes the normalized Hamming similarity from the two 64-bit hashes
-- writes the final `*_sim.csv` files used for evaluation
+It reproduces the notebook logic, but:
+- takes the raw FSS input and output directory as command-line arguments
+- takes the pairs CSV directory as a command-line argument
+- when the FSS input is a directory, it automatically selects only
+  `IMM:0.00_MNEM:0.00_GRAPH:1.00.csv`
+- shows a progress bar
+- can parallelize the conversion across multiple output files
+- writes repository-style `*_sim.csv` files such as
+  `pos_testing_Dataset-1_sim.csv`
+
+Dataset-1 example:
+```bash
+cd Models/functionsimsearch
+python3 convert_fss_results.py \
+  -i ../../Results/FunctionSimSearch/Dataset-1-testing \
+  -p ../../DBs/Dataset-1/pairs/testing \
+  -o ../../Results/FunctionSimSearch/Dataset-1-testing-sim \
+  -n 4
+```
+
+Dataset-2 example:
+```bash
+cd Models/functionsimsearch
+python3 convert_fss_results.py \
+  -i /path/to/raw_fss/Dataset-2 \
+  -p /path/to/DBs/Dataset-2/pairs \
+  -o /path/to/output/Dataset-2 \
+  -n 4
+```
+
+Custom pairs directory example:
+```bash
+cd Models/functionsimsearch
+python3 convert_fss_results.py \
+  -i /path/to/raw_fss_csvs \
+  -p /home/damaoooo/Downloads/binary_function_similarity/DBs/Dataset-1/pairs/testing \
+  -o /path/to/output \
+  -n 4
+```
+
+The original notebook is still useful as a reference:
+- [`Results/notebooks/Convert FunctionSimSearch results.ipynb`](../../Results/notebooks/Convert%20FunctionSimSearch%20results.ipynb)
 
 In other words, Part 2 gives you the hashes, and Part 3 converts them into pairwise similarity CSVs.
 
