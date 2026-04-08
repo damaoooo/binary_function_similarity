@@ -1,5 +1,5 @@
 # FSS: Function Sim Search
-The FSS experiment is made via two steps. [The first](#part-1) is an IDA Pro plugin that takes as input a JSON specifying which functions to consider for the tests, and as output it produces intermediate results in JSON format. [The second part](#part-2) takes as input the JSONs produced by the first part, and it produces as output four CSVs, each of which contains the results of the experiments performed with specific configurations (more details below).
+The FSS experiment is made via two steps. [The first](#part-1) is an IDA Pro plugin that takes as input a JSON specifying which functions to consider for the tests, and as output it produces intermediate results in JSON format. [The second part](#part-2) takes as input the JSONs produced by the first part, and it produces as output four CSVs with the raw FunctionSimSearch hashes for the four tested configurations. If you want evaluation files such as `*_sim.csv`, there is one more conversion step using the existing pairs files in `DBs/.../pairs` ([Part 3](#part-3)).
 
 This tool is based on this project by Thomas Dullien: https://github.com/googleprojectzero/functionsimsearch. We forked the repository (commit `ec5d9e1224ff915b3dc9e7af19e21e110c25239c`) and we customized it to our needs, integrated our layers of analysis, and tweaked the docker container. The specific changes to the initial Google P0 repository are documented in the file `functionsimsearch.patch`.
 
@@ -34,6 +34,26 @@ python3 cli_fss.py \
   -n 16
 ```
 
+Dataset-1 testing:
+```bash
+cd Models/functionsimsearch/IDA_fss
+python3 cli_fss.py \
+  --ida-path /home/damaoooo/ida-pro-9.3 \
+  -j ../../../DBs/Dataset-1/features/testing/selected_testing_Dataset-1.json \
+  -o ../fss_Dataset-1-testing \
+  -n 16
+```
+
+Dataset-2 testing:
+```bash
+cd Models/functionsimsearch/IDA_fss
+python3 cli_fss.py \
+  --ida-path /home/damaoooo/ida-pro-9.3 \
+  -j ../../../DBs/Dataset-2/features/selected_testing_Dataset-2.json \
+  -o ../fss_Dataset-2 \
+  -n 16
+```
+
 Run unit tests:
 ```bash
 python3 -m unittest test_fss.py
@@ -45,7 +65,17 @@ python3 -m unittest test_large_fss.py
 
 ## Part 2
 - **Input**: a directory with JSONs obtained via the IDA_fss plugin
-- **Output**: four CSVs, each of which containing the results for one of the specific four tested configurations
+- **Output**: four CSVs, each of which containing the raw hashes for one of the specific four tested configurations
+
+Useful options:
+- `-n/--jobs`: number of worker processes used to hash input JSON files in
+  parallel (`0` means auto)
+- `-v/--verbose`: print per-input JSON completion details
+
+The parallelization is file-based: one worker processes one input JSON at a
+time. This scales well when the input directory contains many `_fss.json`
+files. If the workload is dominated by one very large JSON, further sharding
+would need to happen at the function level.
 
 Example input: [testdata/fss_jsons](testdata/fss_jsons).
 Example output: [testdata/fss_csvs](testdata/fss_csvs).
@@ -78,7 +108,7 @@ docker build -t fss ./functionsimsearch
 
 - Run the main script within the docker container: 
 ```bash
-docker run --rm -it fss -v <full-path-to-the-input-jsons-dir>:/input -v <full-path-to-the-output-csvs-dir>:/output /fss_simhasher.py
+docker run --rm -it fss -v <full-path-to-the-input-jsons-dir>:/input -v <full-path-to-the-output-csvs-dir>:/output /fss_simhasher.py -n 16
 ```
 
 Example (it creates four CSVs in `/tmp/fss_csvs`):
@@ -86,10 +116,49 @@ Example (it creates four CSVs in `/tmp/fss_csvs`):
 docker run --rm -v $(pwd)/testdata/fss_jsons:/input -v /tmp/fss_csvs:/output -it fss /fss_simhasher.py
 ```
 
-- Run the script for the Dataset-2
+- Run the script for Dataset-1 testing
 ```bash
-docker run --rm -v $(pwd)/../../DBs/Dataset-2/features/fss_Dataset-2:/input -v $(pwd)/../../Results/FunctionSimSearch/Dataset-2:/output -it fss /fss_simhasher.py
+cd Models/functionsimsearch
+docker run --rm \
+  -v "$(pwd)/fss_Dataset-1-testing":/input \
+  -v "$(pwd)/../../Results/FunctionSimSearch/Dataset-1-testing":/output \
+  -it fss /fss_simhasher.py -n 16
 ```
+
+- Run the script for Dataset-2
+```bash
+cd Models/functionsimsearch
+docker run --rm \
+  -v "$(pwd)/fss_Dataset-2":/input \
+  -v "$(pwd)/../../Results/FunctionSimSearch/Dataset-2":/output \
+  -it fss /fss_simhasher.py -n 16
+```
+
+This produces these four files in the output directory:
+- `IMM:4.00_MNEM:0.05_GRAPH:1.00.csv`
+- `IMM:0.00_MNEM:0.00_GRAPH:1.00.csv`
+- `IMM:0.00_MNEM:1.00_GRAPH:1.00.csv`
+- `IMM:1.00_MNEM:1.00_GRAPH:1.00.csv`
+
+These are raw FunctionSimSearch outputs, not final `*_sim.csv` evaluation files.
+
+## Part 3
+To compute recall@K or other pairwise metrics, merge the raw FSS CSVs from Part 2 with the existing pairs files:
+
+- Dataset-1: `DBs/Dataset-1/pairs/testing`
+- Dataset-2: `DBs/Dataset-2/pairs`
+- Dataset-Vulnerability: `DBs/Dataset-Vulnerability/pairs`
+
+The repository already includes a notebook for this conversion:
+- [`Results/notebooks/Convert FunctionSimSearch results.ipynb`](../../Results/notebooks/Convert%20FunctionSimSearch%20results.ipynb)
+
+That notebook:
+- loads one raw FSS CSV
+- joins it with the existing pairs CSVs
+- computes the normalized Hamming similarity from the two 64-bit hashes
+- writes the final `*_sim.csv` files used for evaluation
+
+In other words, Part 2 gives you the hashes, and Part 3 converts them into pairwise similarity CSVs.
 
 ## Copyright information about FunctionSimSearch
 

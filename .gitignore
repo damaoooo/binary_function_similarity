@@ -63,7 +63,8 @@ test*.svg
 .idea
 *.zip
 
-*log*
+*.log
+*.log.*
 
 *.data*
 *.index
@@ -73,3 +74,6 @@ test*.svg
 *.npy
 
 Models/**/*.png
+!Models/Catalog1/*.py
+
+*.so

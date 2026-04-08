@@ -57,20 +57,46 @@ print(jaccard_similarity(a, b)) # 0.06666666666666667
 print(jaccard_similarity(a, a)) # 1.0
 ```
 
-If you already have the repository pairs under `DBs/.../pairs`, use [`catalog1_to_pairs.py`](catalog1_to_pairs.py) to convert one Catalog1 feature CSV plus that pairs directory into `*_sim.csv` files:
-```bash
-# Dataset-1, signature size 16
-python3 catalog1_to_pairs.py -c Dataset-1_catalog1_16.csv -p ../../DBs/Dataset-1/pairs/testing -o ./catalog1_16_sim_Dataset-1
+If you already have the repository pairs under `DBs/.../pairs`, you do **not** need to generate new pair CSVs for Catalog1. Use [`catalog1_to_pairs.py`](catalog1_to_pairs.py) to convert one Catalog1 feature CSV plus that existing pairs directory into `*_sim.csv` files.
 
-# Dataset-2, signature size 64
-python3 catalog1_to_pairs.py -c Dataset-2_catalog1_64.csv -p ../../DBs/Dataset-2/pairs -o ./catalog1_64_sim_Dataset-2
-```
+The script takes:
+* one Catalog1 CSV for one signature size
+* one existing pairs directory from `DBs/.../pairs`
+* one output directory where the scored CSVs will be written
 
 This writes one scored CSV per input pairs file, for example:
 * `pos_testing_*.csv` -> `pos_testing_*_sim.csv`
 * `neg_testing_*.csv` -> `neg_testing_*_sim.csv`
 * `pos_rank_testing_*.csv` -> `pos_rank_testing_*_sim.csv`
 * `neg_rank_testing_*.csv` -> `neg_rank_testing_*_sim.csv`
+
+Example: convert one Catalog1 CSV into scored pair CSVs:
+```bash
+# Dataset-1, signature size 16
+python3 catalog1_to_pairs.py -c Dataset-1-test_catalog1_16.csv -p ../../DBs/Dataset-1/pairs/testing -o ./Dataset-1-test_catalog1_16_sim
+
+# Dataset-2, signature size 64
+python3 catalog1_to_pairs.py -c Dataset-2_catalog1_64.csv -p ../../DBs/Dataset-2/pairs -o ./Dataset-2_catalog1_64_sim
+```
+
+If you want all four signature sizes, run:
+```bash
+# Dataset-1
+for sig in 16 32 64 128; do
+  python3 catalog1_to_pairs.py \
+    -c "Dataset-1-test_catalog1_${sig}.csv" \
+    -p ../../DBs/Dataset-1/pairs/testing \
+    -o "Dataset-1-test_catalog1_${sig}_sim"
+done
+
+# Dataset-2
+for sig in 16 32 64 128; do
+  python3 catalog1_to_pairs.py \
+    -c "Dataset-2_catalog1_${sig}.csv" \
+    -p ../../DBs/Dataset-2/pairs \
+    -o "Dataset-2_catalog1_${sig}_sim"
+done
+```
 
 **Note:** if the function has less than 4 bytes, `min_function_size_error` is inserted in the `catalog_hash_list` column.
 
